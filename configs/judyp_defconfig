@@ -25,14 +25,7 @@ CONFIG_XNU_NATIVE_VIRTIO_BLOCK=y
 CONFIG_XNU_VERIFIED_ROOT_PROBE=y
 CONFIG_XNU_OWNER_ROOT_AUDIT=y
 CONFIG_XNU_OWNER_ROOT_TRUST=y
-# OFF for the bootstrap build, and the reason is a circular dependency, not a judyp decision:
-# build-sheng-platform-power.py (archive-15) runs the upstream audit-amfi-pmgr-contract.py, which reads
-# a *prelink report* (build/xnu-prelink/native-owner-ufs-rootauth3-candidate.{macho,json}) that only a
-# finished kernel build writes. A from-scratch build therefore cannot produce it, and without the report
-# there is no libShengPlatformPower.a either. Turning the feature off removes the only reference to
-# _sheng_pmgr_run and lets the first kernel link. Re-enable it (y) together with the archive once a
-# kernel.macho + kernel.json exists to seed the audit with; the run 1 artifacts are that seed.
-CONFIG_XNU_SHENG_PMGR=n
+CONFIG_XNU_SHENG_PMGR=y
 CONFIG_XNU_TRUST_CACHE_RUNTIME=y
 CONFIG_XNU_SOURCE_MOCKFS=y
 CONFIG_XNU_NATIVE_CS_HASH_CACHE=y

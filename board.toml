@@ -91,10 +91,7 @@ archives = [
   "build-enchilada-verified-root.py",    # owner keys, OS and SystemOS policies, libVerifiedRootProbe.a (needs the OS images)
   "build-arm-driver.py NativeUfs",
   "build-enchilada-dwc3.py",             # NativeDwc3: SDM845 DWC3 USB device-mode probe (default-off; native-dwc3-probe=1), for the SSH-over-USB channel
-  # Disabled for the bootstrap build: the upstream audit it runs needs a prelink report that only a
-  # finished kernel build writes, so a from-scratch build cannot satisfy it (see configs/judyp_defconfig,
-  # CONFIG_XNU_SHENG_PMGR). Re-enable both together once a kernel.macho + kernel.json exists.
-  # "build-sheng-platform-power.py",
+  "build-sheng-platform-power.py",
   "build-boot-progress.py",          # kits/enchilada (from UniXNU-sheng d92e799): boot progress, fault probe, watchdog/lite job policy, diag export    # the PMGR the original AMFI needs, from UniXNU-sheng
   "build-native-legacy-display.py",  # CPU-rendered display (NativeLegacyDisplay over the UEFI framebuffer), HID input, keystore stub
   "build-enchilada-touch.py",           # libEnchiladaTouch.a: S3706B touch over GENI I2C (enchilada-touch=<stage>, default off), see NOTES-touch.md
