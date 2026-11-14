@@ -176,6 +176,24 @@ jobs:
           python3 device/scripts/compose-xnu-patches.py --write --unixnu "$GITHUB_WORKSPACE"
           python3 device/scripts/compose-xnu-patches.py --unixnu "$GITHUB_WORKSPACE"
 
+      # A first build from scratch has a circular dependency: the storage archive (archive-09) audits a
+      # prelinked kernel, and the build's own kernel.macho only exists once that archive has run. The
+      # audit accepts the pinned kernelcache itself for exactly this case ("reading the kernelcache
+      # directly is what makes a first build from scratch possible", audit-storage-interface-static.py),
+      # and the addresses it derives are module-relative, i.e. identical in any prelink of that cache.
+      # Later runs keep the same seed: it costs one audit, not a rebuild.
+      - name: Seed the storage audit from the pinned kernelcache
+        run: |
+          ./unixnu ipsw fetch KernelCache
+          kc=$(ls out/ipsw/*/kernelcache.decompressed | head -1)
+          [ -f "$kc" ] || { echo "::error::no decompressed kernelcache in out/ipsw"; exit 1; }
+          echo "kernelcache: $kc ($(wc -c < "$kc") bytes)"
+          python3 device/scripts/audit-storage-interface-static.py \
+            --prelinked "$kc" --slide -0x1000000 --out device/build/storage-abi
+          test -f device/build/storage-abi/interface-audit.json
+          echo "ENCHILADA_STORAGE_CANDIDATE=$GITHUB_WORKSPACE/$kc" >> "$GITHUB_ENV"
+          echo "ENCHILADA_STORAGE_AUDIT=$GITHUB_WORKSPACE/device/build/storage-abi/interface-audit.json" >> "$GITHUB_ENV"
+
       - name: Build kernel
         id: kernel
         env:
