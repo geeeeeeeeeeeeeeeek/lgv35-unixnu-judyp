@@ -293,3 +293,37 @@
 | 镜像头部审计（本文件第 3 节数据来源） | WSL `/root/UniXNU-judyp-bringup/staging/audit-imgs.py` |
 | 官方 bootimg 构造 | `cd /root/UniXNU-judyp-bringup && python3 /root/UniXNU/unixnu bootimg …` → `build/boot-judyp.img` |
 | 自制 v0/raw 镜像构造 | WSL `/root/UniXNU-judyp-bringup/staging/make-m1img.py` |
+
+---
+
+## 8. OS 阶段（E44 起）
+
+### E44 内核只能从 macOS CI 出来
+
+- 事实：XNU 的构建要 Xcode 工具链（`clang`/`ld64`/SDK），WSL 与 Windows 都产不出 `kernel.macho`；Gitee 没有 macOS runner，本机也没有 `gh` CLI。
+- 处理：私有仓库 `geeeeeeeeeeeeeeeek/lgv35-unixnu-judyp`（GitHub），`.github/workflows/kernel.yml` 用 `workflow_dispatch` 跑 `macos-26`，产物 `judyp-kernel` / `judyp-payload` / `judyp-bootimg`。
+- 适配点（相对 enchilada 的原 workflow）：
+  - 不再跑 `make-enchilada-uefi.py`，改为 `cp -r overlay/Mu-Silicium/{Platforms,Resources,Silicium-ACPI}` 进检出，再跑 `make-judyp-uefi.py`；
+  - `cp -r Binaries/enchilada Binaries/judyp`（judypPkg 的 vendor DXE 全在 `Binaries/judyp` 下，上游只带 enchilada）；
+  - DTB 用 `Resources/DTBs/judyp.dtb`，输出 `out/judyp/...`，FD 取 `Build/judypPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd`。
+- **踩坑（已修）**：`[board] kit` 不能改成 `judyp`。继承来的 archive 脚本硬编码 `ROOT/kits/enchilada`（`build-enchilada-*.py`、`build-native-legacy-display.py`、`build-boot-progress.py`），而 `kits/<kit>` 是 `unixnu` 从 `package/` 物化出来的。改成 judyp 后这些脚本会在导入期就找不到目录。上游 enchilada 的 `kit` 也是 `enchilada`。
+- 观测（WSL 里查，避免 PowerShell `Invoke-WebRequest` 的安全弹窗）：
+  - `bash /mnt/c/Users/Administrator/AppData/Local/Temp/gh/poll.sh` → 最新 run 的 id/状态
+  - `bash /mnt/c/Users/Administrator/AppData/Local/Temp/gh/steps.sh <run_id>` → 步骤级状态
+- 首次运行：run 43645042016（旧提交，已取消）；run 43645409139（`626412d`）在 **Build kernel** 失败。
+
+### E45 第一次从零构建是死循环，用 pinned kernelcache 破环
+
+- 失败点（run 43645409139，archive-09 `build-enchilada-storage.py`）：
+  `ENCHILADA_STORAGE_CANDIDATE must name a prelinked enchilada kernel.macho with its kernel.json beside it`。
+- 为什么是死循环：该 archive 要审计一个**已 prelink 的 kernel.macho**（默认找 `out/<device>/kernel/kernel.macho`），而 `kernel.macho` 只有在最终 XNU 链接之后才存在；最终链接又需要这个 archive 产出的 `libVirtioMmioBlock.a`/`libVerifiedRootProbe.a`。`unixnu/kernel.py:199-220` 的顺序是 bootstrap pass（**故意**在链接处失败，只为留下 compile records）→ prepare-storage-headers → archives → 最终链接，所以从零跑必然卡在 archive-09。
+- 破环办法（已写入 workflow）：`audit-storage-interface-static.py` 自己写明「--prelinked 也接受 pinned kernelcache 本身，--slide -0x1000000；直接读 kernelcache 正是让从零构建成为可能的原因」，因为它取的地址是 **module-relative**，与任何同一 kernelcache 的 prelink 完全相同。所以作业现在先 `unixnu ipsw fetch KernelCache`，对 `out/ipsw/<build>/kernelcache.decompressed` 跑一次审计，然后导出：
+  - `ENCHILADA_STORAGE_CANDIDATE=<kernelcache.decompressed>`
+  - `ENCHILADA_STORAGE_AUDIT=device/build/storage-abi/interface-audit.json`
+  这正是 archive-09 读的那一对变量。
+- 连带确认：`build-sheng-platform-power.py`（archive-15）用的 `native-owner-ufs-rootauth3-candidate.macho` 就是 archive-09 复制过来的候选，所以 kernelcache 直接当候选也能满足后面的 PMGR 槽位检查。
+- 上游仓库 `keyfan/UniXNU-enchilada-bringup` 只有 2 次 Data seed 运行、没有 kernel 运行，作者是在自己的 Mac 上带着旧 `out/enchilada/kernel/kernel.macho` 做的 —— 所以这条从零路径没有先例可抄。
+- 下一次运行：run 43646946066（`54f6985`）。
+
+
+
