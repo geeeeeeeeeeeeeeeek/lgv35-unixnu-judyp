@@ -44,11 +44,11 @@ jobs:
       - name: Read the UUID the kernel is compiled for
         id: uuid
         run: |
-          configured=$(grep -E '^CONFIG_XNU_OWNER_DATA_VOLUME_UUID=' configs/enchilada_defconfig | cut -d'"' -f2)
+          configured=$(grep -E '^CONFIG_XNU_OWNER_DATA_VOLUME_UUID=' configs/judyp_defconfig | cut -d'"' -f2)
           given="${{ inputs.volume_uuid }}"
           uuid="${given:-$configured}"
           if [ -z "$uuid" ]; then
-            echo "::error::CONFIG_XNU_OWNER_DATA_VOLUME_UUID is not set in configs/enchilada_defconfig and no input was given"
+            echo "::error::CONFIG_XNU_OWNER_DATA_VOLUME_UUID is not set in configs/judyp_defconfig and no input was given"
             exit 1
           fi
           if [ -n "$given" ] && [ "$given" != "$configured" ]; then
@@ -116,7 +116,7 @@ jobs:
           python3 scripts/make-data-seed-macos.py --packer tools/packed_ramdisk.py --out out
       - name: Report what the kernel would have to be compiled for
         run: |
-          configured=$(grep -E '^CONFIG_XNU_OWNER_DATA_VOLUME_UUID=' configs/enchilada_defconfig | cut -d'"' -f2)
+          configured=$(grep -E '^CONFIG_XNU_OWNER_DATA_VOLUME_UUID=' configs/judyp_defconfig | cut -d'"' -f2)
           produced=$(python3 -c "import json; print(json.load(open('out/data-macos.json'))['volume_uuid'])")
           echo "diskutil produced volume UUID $produced"
           echo "the defconfig pins $(printf '%s' "$configured")"

@@ -7,7 +7,12 @@ name: Build kernel, payload and boot image
 #   boot.img       the Android boot image for `fastboot boot`
 #
 # The firmware volume (SILICIUM_UEFI.fd) is built here too, from a Mu-Silicium checkout that this
-# workflow patches with device/scripts/make-enchilada-uefi.py, so no local Mac or Linux box is needed.
+# workflow patches with the LG judyp overlay (overlay/Mu-Silicium) and finalises with
+# device/scripts/make-judyp-uefi.py, so no local Mac or Linux box is needed.
+#
+# This repository is the judyp bring-up tree, so the device-specific values below (overlay path,
+# destination of the Binaries mirror, prebuild script, device tree, output directory and artefact
+# names) are judyp's. enchilada's equivalents are the upstream UniXNU-enchilada-bringup workflow.
 
 on:
   workflow_dispatch:
@@ -15,7 +20,7 @@ on:
       defconfig:
         description: Defconfig name (configs/ of this repository)
         required: true
-        default: enchilada_defconfig
+        default: judyp_defconfig
       xcode:
         description: Xcode version of the macos-26 image (/Applications/Xcode_<version>.app)
         required: true
@@ -109,7 +114,8 @@ jobs:
           [ -f device/board.toml ] || fail "the device repository has no board.toml"
           [ -f "device/configs/$DEFCONFIG" ] || fail "device/configs/$DEFCONFIG not found"
           [ -d "$DEVELOPER_DIR" ] || fail "Xcode not found at $DEVELOPER_DIR"
-          [ -f device/scripts/make-enchilada-uefi.py ] || fail "device/scripts/make-enchilada-uefi.py missing"
+          [ -f device/scripts/make-judyp-uefi.py ] || fail "device/scripts/make-judyp-uefi.py missing"
+          [ -d device/overlay/Mu-Silicium/Platforms/LG/judypPkg ] || fail "the judyp overlay is missing"
           # DarwinBoot provides gUniXNULoaderProtocolGuid, and [payload] loader = "firmware" means
           # UniXNU finds it in the firmware volume rather than on the payload volume. Check it here,
           # before the three-hour kernel build, rather than in the step that needs it.
@@ -123,22 +129,29 @@ jobs:
             echo "$(brew --prefix unifdef)/bin" >> "$GITHUB_PATH"
           fi
 
-      # The Binaries submodule is not optional: Platforms/OnePlus/enchiladaPkg names 79 prebuilt
-      # Qualcomm DXE drivers under Binaries/enchilada and Binaries/generic, and without them the EDK II
-      # build stops halfway with a message that does not name the missing file. --shallow-submodules
-      # keeps the checkout to a single commit per submodule; the archives are still the full size.
-      - name: Check out Mu-Silicium and patch the OnePlus 6 platform package
+      # The overlay is what makes the build work: upstream Mu-Silicium has no LG platform package, so
+      # Platforms/LG/judypPkg, Resources/Configs/judyp.toml, Resources/DTBs/judyp.dts and the
+      # Silicium-ACPI LG platform all arrive from device/overlay/Mu-Silicium. The Binaries submodule is
+      # not optional either: judypPkg names its vendor DXE drivers under Binaries/judyp (LG's own
+      # aboot images), and the checkout only ships Binaries/enchilada, so that tree is mirrored.
+      # --shallow-submodules keeps the checkout to a single commit per submodule; the archives are
+      # still the full size.
+      - name: Check out Mu-Silicium and apply the judyp overlay
         run: |
           git clone --recurse-submodules --shallow-submodules --depth 1 \
             ${MU_REF:+--branch "$MU_REF"} https://github.com/Project-Silicium/Mu-Silicium ../Mu-Silicium
-          python3 device/scripts/make-enchilada-uefi.py ../Mu-Silicium
+          cp -r device/overlay/Mu-Silicium/Platforms \
+                device/overlay/Mu-Silicium/Resources \
+                device/overlay/Mu-Silicium/Silicium-ACPI ../Mu-Silicium/
+          cp -r ../Mu-Silicium/Binaries/enchilada ../Mu-Silicium/Binaries/judyp
+          python3 device/scripts/make-judyp-uefi.py ../Mu-Silicium
         env:
           MU_REF: ${{ inputs.mu_silicium_ref }}
 
       - name: Verify the Qualcomm vendor binaries are present
         run: |
-          files=$(find ../Mu-Silicium/Binaries/enchilada -name '*.efi' 2>/dev/null | wc -l)
-          echo "Binaries/enchilada: $files .efi file(s)"
+          files=$(find ../Mu-Silicium/Binaries/judyp -name '*.efi' 2>/dev/null | wc -l)
+          echo "Binaries/judyp: $files .efi file(s)"
           if [ "$files" -lt 30 ]; then
             echo "::error::the Binaries submodule is empty; the EDK II build cannot link the platform"
             git -C ../Mu-Silicium submodule status Binaries || true
@@ -259,15 +272,16 @@ jobs:
       - name: Build UniXNU package and firmware volume
         id: firmware
         env:
-          # The board preflight (scripts/check-enchilada.py) is a subprocess of this step and has to
+          # The board preflight (scripts/check-judyp.py) is a subprocess of this step and has to
           # find the patched Mu-Silicium checkout; give it the absolute path so it does not depend on
           # the working directory it is invoked from.
           UNIXNU_UEFI: ${{ github.workspace }}/../Mu-Silicium
         run: ./unixnu build package firmware --uefi ../Mu-Silicium
 
-      # Two images, because it is not known yet whether this ABL takes the payload as a 192 MiB ramdisk.
-      # boot.img carries it; boot-noramdisk.img is empty and expects the payload volume on a partition
-      # (see README: flash payload.img, then boot with the empty-ramdisk image).
+      # Two images: judyp's measured route is the payload on a partition of its own (system_a/b) with
+      # an empty ramdisk in the boot image, because the initrd window the ABL reserves is about 18 MiB
+      # and the payload volume is 144 MiB (board.toml [payload]). boot.img with the payload as its
+      # ramdisk is built anyway as the alternative, and only ever tried second.
       #
       # They go into separate directories because bootimg.py writes boot.json next to the image: with
       # both images in one directory the second overwrites the first's report, and the report is the
@@ -276,11 +290,11 @@ jobs:
         id: bootimg
         run: |
           ./unixnu bootimg --uefi ../Mu-Silicium \
-            --dtb ../Mu-Silicium/Resources/DTBs/enchilada.dtb \
-            -o out/enchilada/boot/with-ramdisk/boot.img
+            --dtb ../Mu-Silicium/Resources/DTBs/judyp.dtb \
+            -o out/judyp/boot/with-ramdisk/boot.img
           ./unixnu bootimg --uefi ../Mu-Silicium \
-            --dtb ../Mu-Silicium/Resources/DTBs/enchilada.dtb \
-            --ramdisk none -o out/enchilada/boot/no-ramdisk/boot.img
+            --dtb ../Mu-Silicium/Resources/DTBs/judyp.dtb \
+            --ramdisk none -o out/judyp/boot/no-ramdisk/boot.img
 
       - name: Build the userdata image
         id: userdata
@@ -293,7 +307,7 @@ jobs:
         if: always() && steps.kernel.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: enchilada-kernel
+          name: judyp-kernel
           path: |
             out/*/kernel/kernel.macho
             out/*/kernel/*.log
@@ -304,7 +318,7 @@ jobs:
         if: always() && steps.payload.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: enchilada-payload
+          name: judyp-payload
           path: |
             out/*/payload/payload.img
             out/*/payload/payload.json
@@ -315,13 +329,13 @@ jobs:
         if: always() && steps.bootimg.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: enchilada-bootimg
+          name: judyp-bootimg
           path: |
-            out/enchilada/boot/with-ramdisk/boot.img
-            out/enchilada/boot/with-ramdisk/boot.json
-            out/enchilada/boot/no-ramdisk/boot.img
-            out/enchilada/boot/no-ramdisk/boot.json
-            ../Mu-Silicium/Build/enchiladaPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd
+            out/judyp/boot/with-ramdisk/boot.img
+            out/judyp/boot/with-ramdisk/boot.json
+            out/judyp/boot/no-ramdisk/boot.img
+            out/judyp/boot/no-ramdisk/boot.json
+            ../Mu-Silicium/Build/judypPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd
           if-no-files-found: warn
           retention-days: 7
 
@@ -329,7 +343,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: enchilada-logs
+          name: judyp-logs
           path: out/*/logs/*.log
           if-no-files-found: warn
           retention-days: 7

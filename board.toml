@@ -67,7 +67,9 @@ windows = [
 ]
 
 [kernel]
-defconfig = "enchilada_defconfig"
+# configs/judyp_defconfig is the enchilada set verbatim (same SoC, same XNU, same IPSW target); the LG
+# differences live in this file and in the ADT. See the header of the defconfig.
+defconfig = "judyp_defconfig"
 # Archive builders of the kernel step, in order: the generic part of the sheng list.
 archives = [
   "build-corecrypto-14.py",
