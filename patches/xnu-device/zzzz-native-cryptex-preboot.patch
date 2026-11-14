@@ -1,0 +1,126 @@
+board: ask, once per boot, where dyld's shared cache is supposed to be
+
+The owner composition mounts the SystemOS cryptex as a read-only union over
+"/", so the dyld shared cache that lives on that volume should be reachable
+through the plain System path.  dyld's own search table names only Cryptexes
+paths, and the Cryptexes namespace is built by
+zzyb-native-cryptex-os-view.patch, whose block sits inside
+XNU_OWNER_DATA_MOUNT and is not compiled in this configuration.  The result on
+the device is the fuxi v40 state: cache preparation succeeds, dyld finds no
+cache, and the process ends before main.
+
+This patch runs no mount and changes no state.  shared_region_check_np is called
+by dyld twice per boot, before it opens the cache, so the candidate paths are
+looked up there and their errno is recorded for the boot log.
+An earlier version of this probe lived in openat_internal and wedged the boot:
+launchd opens thousands of files while holding vnode locks and a copyinstr on
+every one of them stalls it.  Measured on the device with the same kernel bytes:
+twelve rounds with the open probe off, zero rounds with it on.
+
+Candidates 10-15 answer the next question rather than the cache one.  Every
+userland process that touches Objective-C aborts in imp_implementationWithBlock,
+because libobjc dlopens /usr/lib/libobjc-trampolines.dylib by absolute path and
+dyld reports "(no such file, not in dyld cache)"; pkd aborts likewise on
+/System/Library/PrivateFrameworks/PlugInKitDaemon.framework/PlugInKitDaemon.
+Both names appear in the SystemOS volume and neither appears in the shared cache
+image list, so the question is whether the composed root has them at all.  A
+lookup that returns 0 with vnode type 1 (VREG) says the file is there and the
+failures happen later, in decmpfs or in the sandbox; ENOENT says the OS volume
+of this image simply does not carry them and the fix has to supply the files.
+candidates 14 and 15 are libobjc.A.dylib, a file that is known to work, so a
+lookup that fails there means the probe itself is wrong.
+
+Controlled by boot-arg native-cryptex-dir, DEFAULT ON; native-cryptex-dir=0
+turns it off.
+diff --git a/bsd/vm/vm_unix.c b/bsd/vm/vm_unix.c
+index 8696353..dd4d2af 100644
+--- a/bsd/vm/vm_unix.c
++++ b/bsd/vm/vm_unix.c
+@@ -100,6 +100,8 @@
+ #include <vm/vm_kern.h>
+ #include <vm/vm_pageout.h>
+ 
++#include <pexpert/pexpert.h>
++
+ #include <mach/shared_region.h>
+ #include <vm/vm_shared_region.h>
+ 
+@@ -2089,6 +2091,68 @@ SYSCTL_INT(_vm, OID_AUTO, shared_region_persistence, CTLFLAG_RW | CTLFLAG_LOCKED
+  * ENOMEM	shared region is empty
+  * EFAULT	bad address for "start_address"
+  */
++/*
++ * Where the dyld shared cache is supposed to be.  The owner composition mounts
++ * the SystemOS cryptex as a read-only union over "/", while dyld searches the
++ * Cryptexes paths its own table names.  Recording the errno of each candidate
++ * once per boot answers which of them this composition actually builds, which
++ * is the question the boot log could not answer before: dyld's diagnostics go
++ * to fd 2 and only the kernel's msgbuf reaches the log window.
++ */
++#define NATIVE_CRYPTEX_RING 16
++#define NATIVE_CRYPTEX_TEXT 96
++static const char *const native_cryptex_candidates[NATIVE_CRYPTEX_RING] = {
++	"/System/Library/Caches/com.apple.dyld",
++	"/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64",
++	"/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64e",
++	"/private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld",
++	"/System/Cryptexes/OS/System/Library/Caches/com.apple.dyld",
++	"/private/preboot",
++	"/private/preboot/Cryptexes",
++	"/usr/lib/dyld",
++	"/private/preboot/System/Library/Caches/com.apple.dyld",
++	"/private/preboot/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64",
++	/* The two files whose absence aborts Objective-C and pkd, and controls that
++	 * are known to work so a failure of the probe itself is visible. */
++	"/usr/lib/libobjc-trampolines.dylib",
++	"/System/Library/PrivateFrameworks/PlugInKitDaemon.framework/PlugInKitDaemon",
++	"/System/Library/PrivateFrameworks/PlugInKitDaemon.framework",
++	"/usr/libexec/pkd",
++	"/usr/lib/libobjc.A.dylib",
++	"/usr/lib",
++};
++volatile int native_cryptex_dir_count;
++volatile int native_cryptex_dir_error[NATIVE_CRYPTEX_RING];
++volatile uint64_t native_cryptex_dir_size[NATIVE_CRYPTEX_RING];
++static int native_cryptex_dir_state = -1;
++
++static void
++native_cryptex_dir_probe(void)
++{
++	if (native_cryptex_dir_state < 0) {
++		uint32_t enable = 1;
++		(void)PE_parse_boot_argn("native-cryptex-dir", &enable, sizeof(enable));
++		native_cryptex_dir_state = enable != 0 ? 1 : 0;
++	}
++	if (native_cryptex_dir_state != 1 || native_cryptex_dir_count != 0) {
++		return;
++	}
++	for (int i = 0; i < NATIVE_CRYPTEX_RING; i++) {
++		vnode_t probe = NULLVP;
++		int error = vnode_lookup(native_cryptex_candidates[i], 0, &probe,
++		    vfs_context_current());
++		native_cryptex_dir_error[i] = error;
++		if (probe != NULLVP) {
++			/* Only the errno and the vnode's type: vnode_size on a union path
++			 * blocks long enough to wedge the boot, and whether the cache file
++			 * exists at all is the question being asked. */
++			native_cryptex_dir_size[i] = (uint64_t)vnode_vtype(probe);
++			vnode_put(probe);
++		}
++	}
++	native_cryptex_dir_count = NATIVE_CRYPTEX_RING;
++}
++
+ int
+ shared_region_check_np(
+ 	__unused struct proc                    *p,
+@@ -2116,6 +2180,9 @@ shared_region_check_np(
+ 		return 0;
+ 	}
+ 
++	/* Record where dyld's shared cache is supposed to be, once per boot. */
++	native_cryptex_dir_probe();
++
+ 	/* retrieve the current tasks's shared region */
+ 	shared_region = vm_shared_region_get(task);
+ 	if (shared_region != NULL) {

@@ -1,0 +1,293 @@
+diff --git a/package/UniXNUPkg/Library/UniXNULib/Menu.c b/package/UniXNUPkg/Library/UniXNULib/Menu.c
+index e3e4619..816a230 100644
+--- a/package/UniXNUPkg/Library/UniXNULib/Menu.c
++++ b/package/UniXNUPkg/Library/UniXNULib/Menu.c
+@@ -21,40 +21,82 @@
+ #endif
+ 
+ //
+-// Physical input = a SimpleTextIn instance that sits on a device path; the
+-// ConSplitter's virtual handle has none.
++// Input devices reach the menu two ways. Anything ConPlatform can bind (a
++// handle with a device path) is aggregated into gST->ConIn by ConSplitter.
++// A SimpleTextIn instance without a device path is invisible to that stack,
++// so it is polled directly; the Qualcomm button driver installs itself that
++// way.
+ //
++#define MAX_ORPHAN_INPUTS  8
++
+ STATIC
+ UINTN
+-CountInputDevices (
+-  VOID
++CollectOrphanInputs (
++  OUT EFI_SIMPLE_TEXT_INPUT_PROTOCOL  **Orphans,
++  IN  UINTN                           MaxOrphans,
++  OUT UINTN                           *Total,
++  OUT UINTN                           *WithPath
+   )
+ {
+-  EFI_STATUS  Status;
+-  EFI_HANDLE  *Handles;
+-  UINTN       Count;
+-  UINTN       Index;
+-  UINTN       Physical;
+-  VOID        *Path;
+-
+-  if (gST->ConIn == NULL) {
+-    return 0;
+-  }
++  EFI_STATUS                      Status;
++  EFI_HANDLE                      *Handles;
++  UINTN                           Count;
++  UINTN                           Index;
++  UINTN                           OrphanCount;
++  VOID                            *Path;
++  EFI_SIMPLE_TEXT_INPUT_PROTOCOL  *Input;
++
++  *Total    = 0;
++  *WithPath = 0;
++  OrphanCount = 0;
+ 
+   Status = gBS->LocateHandleBuffer (ByProtocol, &gEfiSimpleTextInProtocolGuid, NULL, &Count, &Handles);
+   if (EFI_ERROR (Status)) {
+     return 0;
+   }
+ 
+-  Physical = 0;
++  *Total    = Count;
+   for (Index = 0; Index < Count; Index++) {
+     if (!EFI_ERROR (gBS->HandleProtocol (Handles[Index], &gEfiDevicePathProtocolGuid, &Path))) {
+-      Physical++;
++      (*WithPath)++;
++      continue;
++    }
++
++    if ((OrphanCount < MaxOrphans) &&
++        !EFI_ERROR (gBS->HandleProtocol (Handles[Index], &gEfiSimpleTextInProtocolGuid, (VOID **)&Input)) &&
++        (Input != gST->ConIn))
++    {
++      Orphans[OrphanCount++] = Input;
+     }
+   }
+ 
+   FreePool (Handles);
+-  return Physical;
++  return OrphanCount;
++}
++
++STATIC
++EFI_STATUS
++ReadInputKey (
++  IN  EFI_SIMPLE_TEXT_INPUT_PROTOCOL  **Orphans,
++  IN  UINTN                           OrphanCount,
++  OUT EFI_INPUT_KEY                   *Key
++  )
++{
++  UINTN  Index;
++
++  if (gST->ConIn != NULL) {
++    if (!EFI_ERROR (gST->ConIn->ReadKeyStroke (gST->ConIn, Key))) {
++      return EFI_SUCCESS;
++    }
++  }
++
++  for (Index = 0; Index < OrphanCount; Index++) {
++    if (!EFI_ERROR (Orphans[Index]->ReadKeyStroke (Orphans[Index], Key))) {
++      return EFI_SUCCESS;
++    }
++  }
++
++  return EFI_NOT_READY;
+ }
+ 
+ STATIC
+@@ -90,26 +132,49 @@ UniXNUMenuRun (
+   IN BOOLEAN    Countdown
+   )
+ {
+-  EFI_STATUS     Status;
+-  EFI_EVENT      Timer;
+-  EFI_EVENT      Events[2];
+-  UINTN          EventCount;
+-  UINTN          Signaled;
+-  EFI_INPUT_KEY  Key;
+-  UINTN          Selected;
+-  UINTN          Previous;
+-  UINTN          Index;
+-  BOOLEAN        HasInput;
+-  BOOLEAN        UserActive;
+-  INTN           RemainingMs;
+-  UINTN          RotateMs;
+-  UINTN          RotateAccum;
+-  INTN           LastShownSecond;
+-  UINTN          Count;
++  EFI_STATUS                      Status;
++  EFI_EVENT                       Timer;
++  EFI_EVENT                       Events[2];
++  UINTN                           EventCount;
++  UINTN                           Signaled;
++  EFI_INPUT_KEY                   Key;
++  UINTN                           Selected;
++  UINTN                           Previous;
++  UINTN                           Index;
++  BOOLEAN                         HasInput;
++  BOOLEAN                         UserActive;
++  BOOLEAN                         HaveKey;
++  INTN                            RemainingMs;
++  UINTN                           RotateMs;
++  UINTN                           RotateAccum;
++  INTN                            LastShownSecond;
++  UINTN                           Count;
++  EFI_SIMPLE_TEXT_INPUT_PROTOCOL  *Orphans[MAX_ORPHAN_INPUTS];
++  UINTN                           OrphanCount;
++  UINTN                           TotalInputs;
++  UINTN                           InputsWithPath;
++  CHAR16                          Line[128];
+ 
+   Count    = Config->EntryCount;
+   Selected = Config->DefaultIndex;
+-  HasInput = (CountInputDevices () > 0);
++
++  OrphanCount    = CollectOrphanInputs (Orphans, MAX_ORPHAN_INPUTS, &TotalInputs, &InputsWithPath);
++  HasInput       = (gST->ConIn != NULL) || (OrphanCount > 0);
++
++  //
++  // Show what the input search found: instances that the console stack
++  // already owns (with a device path), and ones polled here.
++  //
++  UnicodeSPrint (Line, sizeof (Line), L"%s", Ui->Info);
++  UnicodeSPrint (
++    Ui->Info,
++    sizeof (Ui->Info),
++    L"in %u/%u orph %u  %s",
++    (UINT32)TotalInputs,
++    (UINT32)InputsWithPath,
++    (UINT32)OrphanCount,
++    Line
++    );
+ 
+   if (!Countdown) {
+     RemainingMs = HasInput ? -1 : (INTN)Config->FallbackTimeout * 1000;
+@@ -129,12 +194,12 @@ UniXNUMenuRun (
+     UniXNUUiDrawEntry (Ui, Config, Index, Index == Selected);
+   }
+ 
+-  UniXNUUiDrawStatus (
+-    Ui,
+-    1,
+-    HasInput ? L"Up/Down: select    Enter: boot    1-9: boot entry    Esc: stop timer"
+-             : L"No input device: the default entry boots when the timer ends"
+-    );
++  if (HasInput) {
++    UniXNUUiDrawStatus (Ui, 1, L"Up/Down: select    Enter: boot    1-9: boot entry    Esc: stop timer");
++  } else {
++    UnicodeSPrint (Line, sizeof (Line), L"No input device: textin %u, %u with a device path", (UINT32)TotalInputs, (UINT32)InputsWithPath);
++    UniXNUUiDrawStatus (Ui, 1, Line);
++  }
+   if (Ui->Notice[0] != L'\0') {
+     UniXNUUiDrawStatus (Ui, 2, Ui->Notice);
+   }
+@@ -184,6 +249,7 @@ UniXNUMenuRun (
+     }
+ 
+     Previous = Selected;
++    HaveKey  = FALSE;
+     if (Signaled == 0) {
+       if (RemainingMs > 0) {
+         RemainingMs -= TICK_MS;
+@@ -201,11 +267,19 @@ UniXNUMenuRun (
+           Selected    = (Selected + 1) % Count;
+         }
+       }
+-    } else {
+-      if (EFI_ERROR (gST->ConIn->ReadKeyStroke (gST->ConIn, &Key))) {
+-        continue;
+-      }
+ 
++    }
++
++    //
++    // Orphan instances are never signalled through gST->ConIn, so poll every
++    // wake-up no matter which event fired.
++    //
++    if (!EFI_ERROR (ReadInputKey (Orphans, OrphanCount, &Key))) {
++      HaveKey = TRUE;
++    }
++
++
++    if (HaveKey) {
+       if (!UserActive) {
+         //
+         // The first key takes over: no more countdown or rotation, and the
+@@ -216,6 +290,13 @@ UniXNUMenuRun (
+         Selected    = Config->DefaultIndex;
+       }
+ 
++      //
++      // Echo what arrived: during bring-up this is the only way to tell a
++      // key that was never delivered from one with an unexpected code.
++      //
++      UnicodeSPrint (Line, sizeof (Line), L"key: scan 0x%x char 0x%x", (UINT32)Key.ScanCode, (UINT32)Key.UnicodeChar);
++      UniXNUUiDrawStatus (Ui, 1, Line);
++
+       if ((Key.ScanCode == SCAN_UP) || (Key.UnicodeChar == L'k')) {
+         Selected = (Selected + Count - 1) % Count;
+       } else if ((Key.ScanCode == SCAN_DOWN) || (Key.UnicodeChar == L'j')) {
+@@ -408,14 +489,20 @@ UniXNUMenuConfirm (
+   OUT UINTN      *Choice
+   )
+ {
+-  EFI_INPUT_KEY  Key;
+-  UINTN          Index;
+-  UINTN          Shown;
+-  UINTN          Items;
+-  CHAR16         Line[160];
+-
+-  *Choice = 0;
+-  if ((gST->ConIn == NULL) || (CountInputDevices () == 0)) {
++  EFI_INPUT_KEY                   Key;
++  UINTN                           Index;
++  UINTN                           Shown;
++  UINTN                           Items;
++  CHAR16                          Line[160];
++  EFI_SIMPLE_TEXT_INPUT_PROTOCOL  *Orphans[MAX_ORPHAN_INPUTS];
++  UINTN                           OrphanCount;
++  UINTN                           TotalInputs;
++  UINTN                           InputsWithPath;
++
++  *Choice     = 0;
++  OrphanCount = CollectOrphanInputs (Orphans, MAX_ORPHAN_INPUTS, &TotalInputs, &InputsWithPath);
++  UniXNULog ("menu: confirm '%a' with in %u/%u orph %u", (Entry->Id != NULL) ? Entry->Id : "?", (UINT32)TotalInputs, (UINT32)InputsWithPath, (UINT32)OrphanCount);
++  if ((gST->ConIn == NULL) && (OrphanCount == 0)) {
+     UniXNULog ("menu: confirmation needs an input device, cancelled");
+     return FALSE;
+   }
+@@ -434,7 +521,7 @@ UniXNUMenuConfirm (
+   // The press that chose the entry, and anything typed since, must not answer the question.
+   //
+   gBS->Stall (500000);
+-  while (!EFI_ERROR (gST->ConIn->ReadKeyStroke (gST->ConIn, &Key))) {
++  while (!EFI_ERROR (ReadInputKey (Orphans, OrphanCount, &Key))) {
+   }
+ 
+   for ( ; ;) {
+@@ -445,11 +532,15 @@ UniXNUMenuConfirm (
+       UniXNUUiDrawStatus (Ui, 1, L"");
+     }
+ 
+-    if (EFI_ERROR (gBS->WaitForEvent (1, &gST->ConIn->WaitForKey, &Index))) {
+-      return FALSE;
++    if (gST->ConIn != NULL) {
++      if (EFI_ERROR (gBS->WaitForEvent (1, &gST->ConIn->WaitForKey, &Index))) {
++        return FALSE;
++      }
++    } else {
++      gBS->Stall (TICK_MS * 1000);
+     }
+ 
+-    if (EFI_ERROR (gST->ConIn->ReadKeyStroke (gST->ConIn, &Key))) {
++    if (EFI_ERROR (ReadInputKey (Orphans, OrphanCount, &Key))) {
+       continue;
+     }
+ 
