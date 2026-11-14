@@ -15,7 +15,12 @@ name = "judyp"
 soc = "SDM845"
 os_profile = "ipados-17.7.11-21H461"  # record key for scripts/porting-record.py; schema-1 config.py never reads it
 description = "LG V35 ThinQ"
-kit = "judyp"                         # the package/ of this repository appears as kits/judyp in the build tree
+kit = "enchilada"                     # the package/ of this repository appears as kits/enchilada in the build tree
+# The kit label is NOT the board name and must stay "enchilada": every inherited archive builder
+# (scripts/build-enchilada-*.py, build-native-legacy-display.py, build-boot-progress.py) computes
+# KIT = <repo>/kits/enchilada, which unixnu materialises from package/ under this label. Renaming it
+# to judyp makes all of them fail at import time with a missing kits/judyp. The board itself is judyp
+# everywhere it matters: [board] name, the overlay platform package, the ADT and the boot image.
 
 # The target OS image: the unchanged iPad7,1 iPadOS 17.7.11 restore image, the sheng target. SDM845 is ARMv8.2 without
 # pointer authentication, so it runs arm64 userlands only; iPadOS 17 on A10X is the newest one the XNU source matches.
