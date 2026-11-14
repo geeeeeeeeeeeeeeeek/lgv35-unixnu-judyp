@@ -162,6 +162,10 @@ jobs:
           kc=$(ls out/ipsw/*/kernelcache.decompressed | head -1)
           [ -f "$kc" ] || { echo "::error::no decompressed kernelcache in out/ipsw"; exit 1; }
           echo "kernelcache: $kc ($(wc -c < "$kc") bytes)"
+          # The archive stages the candidate with Path(candidate).with_suffix('.macho'), so the seed has
+          # to be named *.macho or nothing is copied and archive-15 reports "No reference candidate".
+          cand="${kc%.decompressed}.macho"
+          cp "$kc" "$cand"
           # audit-storage-interface-static.py imports native_prelink from kits/XnuPrelink and only
           # searches paths relative to the device repository; from here the kit lives in the UniXNU
           # checkout, so name it.
@@ -170,9 +174,9 @@ jobs:
           echo "native_prelink: $pre"
           PYTHONPATH="$pre:${PYTHONPATH:-}" \
             python3 device/scripts/audit-storage-interface-static.py \
-              --prelinked "$kc" --slide=-0x1000000 --out device/build/storage-abi
+              --prelinked "$cand" --slide=-0x1000000 --out device/build/storage-abi
           test -f device/build/storage-abi/interface-audit.json
-          echo "ENCHILADA_STORAGE_CANDIDATE=$GITHUB_WORKSPACE/$kc" >> "$GITHUB_ENV"
+          echo "ENCHILADA_STORAGE_CANDIDATE=$GITHUB_WORKSPACE/$cand" >> "$GITHUB_ENV"
           echo "ENCHILADA_STORAGE_AUDIT=$GITHUB_WORKSPACE/device/build/storage-abi/interface-audit.json" >> "$GITHUB_ENV"
 
       - name: Build kernel
