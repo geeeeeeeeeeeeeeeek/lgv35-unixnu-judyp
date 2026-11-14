@@ -178,72 +178,77 @@ jobs:
 
       # Two inputs the kernel step needs before it starts: the pinned kernelcache (prelink) and the OS /
       # SystemOS envelopes that build-enchilada-verified-root.py hashes. Neither is part of the default
-      # [ipsw] fetch list, which only names the small components.
+      # [ipsw] fetch list, which only names the small components. The audit is here because the seed
+      # build below has no prelink yet; audit-storage-interface-static.py accepts the pinned kernelcache
+      # itself with --slide, its addresses being module-relative.
       - name: Fetch the IPSW components the kernel archives need
         run: |
           ./unixnu ipsw fetch KernelCache
           ./unixnu ipsw fetch OS Cryptex1,SystemOS
+          kc=$(ls out/ipsw/*/kernelcache.decompressed | head -1)
+          [ -f "$kc" ] || { echo "::error::no decompressed kernelcache in out/ipsw"; exit 1; }
+          # The archive stages it with Path(candidate).with_suffix('.macho'), so it must be named *.macho.
+          cand="${kc%.decompressed}.macho"
+          cp "$kc" "$cand"
+          pre=$(dirname "$(find "$GITHUB_WORKSPACE" -name native_prelink.py -print -quit)")
+          [ -n "$pre" ] || { echo "::error::native_prelink.py not found"; exit 1; }
+          PYTHONPATH="$pre:${PYTHONPATH:-}" \
+            python3 device/scripts/audit-storage-interface-static.py \
+              --prelinked "$cand" --slide=-0x1000000 --out device/build/storage-abi
+          echo "kernelcache audit: $(wc -c < "$cand") bytes"
 
-      # A from-scratch kernel build cannot satisfy the archives that audit a *prelink report*
-      # (build-enchilada-storage.py, build-sheng-platform-power.py, build-native-legacy-display.py and
-      # the probe archives): the report is a product of a finished build, so there is nothing to audit
-      # yet. The way out is a throwaway seed build that touches no candidate at all:
-      #   * the shared patch series only -- its owner/verified-root code is behind XNU_* configs, so the
-      #     device patches (whose externs are not guarded) are moved aside;
-      #   * a defconfig with every candidate-dependent feature off;
-      #   * the archives that build from compile records alone.
-      # It links, then prelinks against the same pinned kernelcache, and leaves
-      # out-seed/judyp/kernel/kernel.macho with kernel.json beside it -- the exact pair the real build
-      # audits. Everything is restored before that build starts.
+      # A from-scratch build cannot satisfy the archives that audit a *prelink report*
+      # (build-sheng-platform-power.py, build-native-legacy-display.py and the probe archives): the
+      # report is a product of a finished build. The way out is a throwaway seed build that:
+      #   * drops exactly those archives, and the two XNU_* features only they provide;
+      #   * keeps everything else, including UFS / owner-root / verified-root / boot progress, which
+      #     depend on each other (boot progress refuses to build without the audited UFS root);
+      #   * audits the pinned kernelcache for the storage archive, which has no prelink to read yet.
+      # It links, then prelinks against that same kernelcache, and leaves out-seed/kernel.macho with
+      # kernel.json beside it -- the pair every dropped archive audits in the real build below.
       - name: Build a seed kernel for the prelink audits
         env:
           UNIXNU_UEFI: ${{ github.workspace }}/../Mu-Silicium
         run: |
           set -eu
           cp device/board.toml /tmp/board.toml.device
-          # Rename the patch files, not the directory: compose refuses to run when patches/xnu-device is
-          # absent, and it only globs *.patch, so the .off files are invisible to it.
-          for f in device/patches/xnu-device/*.patch; do mv "$f" "$f.off"; done
-          python3 device/scripts/compose-xnu-patches.py --write --unixnu "$GITHUB_WORKSPACE"
           python3 - <<'PY'
           import pathlib
           import re
 
           root = pathlib.Path('device')
 
-          off = {
-              'XNU_OWNER_ROOT_AUDIT', 'XNU_OWNER_ROOT_TRUST', 'XNU_VERIFIED_ROOT_PROBE',
-              'XNU_NATIVE_RAM_BLOCK', 'XNU_NATIVE_VIRTIO_BLOCK', 'XNU_NATIVE_UFS',
-              'XNU_NATIVE_LEGACY_DISPLAY', 'XNU_SHENG_PMGR',
-              'XNU_TRUST_CACHE_RUNTIME', 'XNU_OWNER_BOOT_MANIFEST', 'XNU_OWNER_DATA_MOUNT',
-              'XNU_OWNER_CACHE_MOUNT', 'XNU_OWNER_CACHE_STARTUP', 'XNU_OWNER_CACHE_CARRIER',
-          }
-          empty = {'XNU_EXTRA_LD_ARCHIVES', 'XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE', 'XNU_VERIFIED_ROOT_ARCHIVE'}
+          # Two features whose only provider is a dropped archive.
+          off = {'XNU_SHENG_PMGR', 'XNU_NATIVE_LEGACY_DISPLAY'}
+          # Only the archive that survives stays force-loaded.
+          extra = '-Wl,-force_load,{tree}/build/enchilada-dwc3/libNativeDwc3.a'
           out = []
           for line in (root / 'configs/judyp_defconfig').read_text().splitlines():
               m = re.match(r'CONFIG_(\w+)=', line)
               if m and m.group(1) in off:
                   out.append(f'CONFIG_{m.group(1)}=n')
-              elif m and m.group(1) in empty:
-                  out.append(f'CONFIG_{m.group(1)}=""')
+              elif m and m.group(1) == 'XNU_EXTRA_LD_ARCHIVES':
+                  out.append(f'CONFIG_XNU_EXTRA_LD_ARCHIVES="{extra}"')
               else:
                   out.append(line)
           (root / 'configs/judyp_seed_defconfig').write_text('\n'.join(out) + '\n')
 
-          keep = ('build-corecrypto-14.py', 'build-arm-driver.py ArmDTPlatform',
-                  'build-arm-driver.py ArmCpu', 'build-arm-driver.py NativeAES',
-                  'build-native-aes-bindings.py', 'build-mockfs-fixture.py',
-                  'build-libpthread-kernel.py', 'build-boot-progress.py')
+          drop = ('build-sheng-platform-power.py', 'build-native-legacy-display.py',
+                  'build-enchilada-touch.py', 'build-enchilada-cpufreq.py',
+                  'build-enchilada-msm-dsi.py', 'build-enchilada-gauge.py',
+                  'build-enchilada-smmu.py', 'build-enchilada-adreno.py')
           lines = (root / 'board.toml').read_text().splitlines()
           start = next(i for i, l in enumerate(lines) if l.strip() == 'archives = [')
           end = next(i for i in range(start, len(lines)) if lines[i].strip() == ']')
           kept = [l for l in lines[start + 1:end]
-                  if l.strip().startswith('"') and any(k in l for k in keep)]
+                  if l.strip().startswith('"') and not any(k in l for k in drop)]
           (root / 'board.toml').write_text('\n'.join(lines[:start + 1] + kept + lines[end:]) + '\n')
           print('seed archives:', len(kept))
           PY
           ./unixnu defconfig judyp_seed_defconfig -D "$GITHUB_WORKSPACE/device"
-          ./unixnu build kernel -D "$GITHUB_WORKSPACE/device"
+          ENCHILADA_STORAGE_CANDIDATE="$GITHUB_WORKSPACE/$(ls out/ipsw/*/kernelcache.macho)" \
+          ENCHILADA_STORAGE_AUDIT="$GITHUB_WORKSPACE/device/build/storage-abi/interface-audit.json" \
+            ./unixnu build kernel -D "$GITHUB_WORKSPACE/device"
 
           # Copy the seed out of the build output before the real build overwrites out/judyp/kernel.
           mkdir -p "$GITHUB_WORKSPACE/out-seed"
@@ -251,13 +256,12 @@ jobs:
           cp out/judyp/kernel/kernel.json "$GITHUB_WORKSPACE/out-seed/kernel.json"
 
           cp /tmp/board.toml.device device/board.toml
-          for f in device/patches/xnu-device/*.patch.off; do mv "$f" "${f%.off}"; done
-          python3 device/scripts/compose-xnu-patches.py --write --unixnu "$GITHUB_WORKSPACE"
-          python3 device/scripts/compose-xnu-patches.py --unixnu "$GITHUB_WORKSPACE"
           seed="$GITHUB_WORKSPACE/out-seed/kernel.macho"
           test -f "$seed"
           test -f "${seed%.macho}.json"
           echo "seed prelink: $seed ($(wc -c < "$seed") bytes)"
+          # The real build audits the seed; ENCHILADA_STORAGE_AUDIT stays unset so the storage archive
+          # re-audits the seed image instead of comparing it with the kernelcache audit above.
           echo "ENCHILADA_STORAGE_CANDIDATE=$seed" >> "$GITHUB_ENV"
           ./unixnu defconfig judyp_defconfig -D "$GITHUB_WORKSPACE/device"
 
