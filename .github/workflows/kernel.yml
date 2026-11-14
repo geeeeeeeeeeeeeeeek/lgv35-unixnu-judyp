@@ -243,13 +243,18 @@ jobs:
           print('seed archives:', len(kept))
           PY
           ./unixnu defconfig judyp_seed_defconfig -D "$GITHUB_WORKSPACE/device"
-          ./unixnu build kernel --out "$GITHUB_WORKSPACE/out-seed"
+          ./unixnu build kernel -D "$GITHUB_WORKSPACE/device"
+
+          # Copy the seed out of the build output before the real build overwrites out/judyp/kernel.
+          mkdir -p "$GITHUB_WORKSPACE/out-seed"
+          cp out/judyp/kernel/kernel.macho "$GITHUB_WORKSPACE/out-seed/kernel.macho"
+          cp out/judyp/kernel/kernel.json "$GITHUB_WORKSPACE/out-seed/kernel.json"
 
           cp /tmp/board.toml.device device/board.toml
           for f in device/patches/xnu-device/*.patch.off; do mv "$f" "${f%.off}"; done
           python3 device/scripts/compose-xnu-patches.py --write --unixnu "$GITHUB_WORKSPACE"
           python3 device/scripts/compose-xnu-patches.py --unixnu "$GITHUB_WORKSPACE"
-          seed="$GITHUB_WORKSPACE/out-seed/judyp/kernel/kernel.macho"
+          seed="$GITHUB_WORKSPACE/out-seed/kernel.macho"
           test -f "$seed"
           test -f "${seed%.macho}.json"
           echo "seed prelink: $seed ($(wc -c < "$seed") bytes)"
