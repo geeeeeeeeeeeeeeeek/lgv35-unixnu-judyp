@@ -201,9 +201,9 @@ jobs:
         run: |
           set -eu
           cp device/board.toml /tmp/board.toml.device
-          # A sibling name, not a move out of the repository: compose globs patches/xnu-device/*.patch,
-          # so this leaves the directory present but empty.
-          mv device/patches/xnu-device device/patches/xnu-device.off
+          # Rename the patch files, not the directory: compose refuses to run when patches/xnu-device is
+          # absent, and it only globs *.patch, so the .off files are invisible to it.
+          for f in device/patches/xnu-device/*.patch; do mv "$f" "$f.off"; done
           python3 device/scripts/compose-xnu-patches.py --write --unixnu "$GITHUB_WORKSPACE"
           python3 - <<'PY'
           import pathlib
@@ -246,7 +246,7 @@ jobs:
           ./unixnu build kernel --out "$GITHUB_WORKSPACE/out-seed"
 
           cp /tmp/board.toml.device device/board.toml
-          rm -rf device/patches/xnu-device && mv device/patches/xnu-device.off device/patches/xnu-device
+          for f in device/patches/xnu-device/*.patch.off; do mv "$f" "${f%.off}"; done
           python3 device/scripts/compose-xnu-patches.py --write --unixnu "$GITHUB_WORKSPACE"
           python3 device/scripts/compose-xnu-patches.py --unixnu "$GITHUB_WORKSPACE"
           seed="$GITHUB_WORKSPACE/out-seed/judyp/kernel/kernel.macho"
