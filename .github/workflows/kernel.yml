@@ -153,9 +153,12 @@ jobs:
       # directly is what makes a first build from scratch possible", audit-storage-interface-static.py),
       # and the addresses it derives are module-relative, i.e. identical in any prelink of that cache.
       # Later runs keep the same seed: it costs one audit, not a rebuild.
-      - name: Seed the storage audit from the pinned kernelcache
+      - name: Fetch the IPSW components the kernel archives need
         run: |
           ./unixnu ipsw fetch KernelCache
+          # build-enchilada-verified-root.py (archive-12) hashes the OS and SystemOS envelopes; they are
+          # not part of the default [ipsw] fetch list, which only names the small components.
+          ./unixnu ipsw fetch OS Cryptex1,SystemOS
           kc=$(ls out/ipsw/*/kernelcache.decompressed | head -1)
           [ -f "$kc" ] || { echo "::error::no decompressed kernelcache in out/ipsw"; exit 1; }
           echo "kernelcache: $kc ($(wc -c < "$kc") bytes)"
