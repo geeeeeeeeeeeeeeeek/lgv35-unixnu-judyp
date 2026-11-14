@@ -167,7 +167,7 @@ jobs:
           echo "native_prelink: $pre"
           PYTHONPATH="$pre:${PYTHONPATH:-}" \
             python3 device/scripts/audit-storage-interface-static.py \
-              --prelinked "$kc" --slide -0x1000000 --out device/build/storage-abi
+              --prelinked "$kc" --slide=-0x1000000 --out device/build/storage-abi
           test -f device/build/storage-abi/interface-audit.json
           echo "ENCHILADA_STORAGE_CANDIDATE=$GITHUB_WORKSPACE/$kc" >> "$GITHUB_ENV"
           echo "ENCHILADA_STORAGE_AUDIT=$GITHUB_WORKSPACE/device/build/storage-abi/interface-audit.json" >> "$GITHUB_ENV"
