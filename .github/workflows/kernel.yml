@@ -129,35 +129,6 @@ jobs:
             echo "$(brew --prefix unifdef)/bin" >> "$GITHUB_PATH"
           fi
 
-      # The overlay is what makes the build work: upstream Mu-Silicium has no LG platform package, so
-      # Platforms/LG/judypPkg, Resources/Configs/judyp.toml, Resources/DTBs/judyp.dts and the
-      # Silicium-ACPI LG platform all arrive from device/overlay/Mu-Silicium. The Binaries submodule is
-      # not optional either: judypPkg names its vendor DXE drivers under Binaries/judyp (LG's own
-      # aboot images), and the checkout only ships Binaries/enchilada, so that tree is mirrored.
-      # --shallow-submodules keeps the checkout to a single commit per submodule; the archives are
-      # still the full size.
-      - name: Check out Mu-Silicium and apply the judyp overlay
-        run: |
-          git clone --recurse-submodules --shallow-submodules --depth 1 \
-            ${MU_REF:+--branch "$MU_REF"} https://github.com/Project-Silicium/Mu-Silicium ../Mu-Silicium
-          cp -r device/overlay/Mu-Silicium/Platforms \
-                device/overlay/Mu-Silicium/Resources \
-                device/overlay/Mu-Silicium/Silicium-ACPI ../Mu-Silicium/
-          cp -r ../Mu-Silicium/Binaries/enchilada ../Mu-Silicium/Binaries/judyp
-          python3 device/scripts/make-judyp-uefi.py ../Mu-Silicium
-        env:
-          MU_REF: ${{ inputs.mu_silicium_ref }}
-
-      - name: Verify the Qualcomm vendor binaries are present
-        run: |
-          files=$(find ../Mu-Silicium/Binaries/judyp -name '*.efi' 2>/dev/null | wc -l)
-          echo "Binaries/judyp: $files .efi file(s)"
-          if [ "$files" -lt 30 ]; then
-            echo "::error::the Binaries submodule is empty; the EDK II build cannot link the platform"
-            git -C ../Mu-Silicium submodule status Binaries || true
-            exit 1
-          fi
-
       - name: Select the device
         run: ./unixnu defconfig "$DEFCONFIG" -D "$GITHUB_WORKSPACE/device"
 
@@ -188,8 +159,15 @@ jobs:
           kc=$(ls out/ipsw/*/kernelcache.decompressed | head -1)
           [ -f "$kc" ] || { echo "::error::no decompressed kernelcache in out/ipsw"; exit 1; }
           echo "kernelcache: $kc ($(wc -c < "$kc") bytes)"
-          python3 device/scripts/audit-storage-interface-static.py \
-            --prelinked "$kc" --slide -0x1000000 --out device/build/storage-abi
+          # audit-storage-interface-static.py imports native_prelink from kits/XnuPrelink and only
+          # searches paths relative to the device repository; from here the kit lives in the UniXNU
+          # checkout, so name it.
+          pre=$(dirname "$(find "$GITHUB_WORKSPACE" -name native_prelink.py -print -quit)")
+          [ -n "$pre" ] || { echo "::error::native_prelink.py not found in $GITHUB_WORKSPACE"; exit 1; }
+          echo "native_prelink: $pre"
+          PYTHONPATH="$pre:${PYTHONPATH:-}" \
+            python3 device/scripts/audit-storage-interface-static.py \
+              --prelinked "$kc" --slide -0x1000000 --out device/build/storage-abi
           test -f device/build/storage-abi/interface-audit.json
           echo "ENCHILADA_STORAGE_CANDIDATE=$GITHUB_WORKSPACE/$kc" >> "$GITHUB_ENV"
           echo "ENCHILADA_STORAGE_AUDIT=$GITHUB_WORKSPACE/device/build/storage-abi/interface-audit.json" >> "$GITHUB_ENV"
@@ -286,6 +264,39 @@ jobs:
         run: |
           mcopy -i out/*/payload/payload.img /tmp/DarwinBoot.efi ::/EFI/UniXNU/Payloads/DarwinBoot.efi
           echo "staged DarwinBoot.efi on the payload volume"
+
+      # The Mu-Silicium checkout lives down here, after everything the kernel needs, because cloning it
+      # (its Binaries submodule is the bulk) is the slowest step of the job and the kernel is what gets
+      # iterated on. Only the firmware volume and the boot image need it.
+      #
+      # The overlay is what makes the build work: upstream Mu-Silicium has no LG platform package, so
+      # Platforms/LG/judypPkg, Resources/Configs/judyp.toml, Resources/DTBs/judyp.dts and the
+      # Silicium-ACPI LG platform all arrive from device/overlay/Mu-Silicium. The Binaries submodule is
+      # not optional either: judypPkg names its vendor DXE drivers under Binaries/judyp (LG's own
+      # aboot images), and the checkout only ships Binaries/enchilada, so that tree is mirrored.
+      # --shallow-submodules keeps the checkout to a single commit per submodule; the archives are
+      # still the full size.
+      - name: Check out Mu-Silicium and apply the judyp overlay
+        run: |
+          git clone --recurse-submodules --shallow-submodules --depth 1 \
+            ${MU_REF:+--branch "$MU_REF"} https://github.com/Project-Silicium/Mu-Silicium ../Mu-Silicium
+          cp -r device/overlay/Mu-Silicium/Platforms \
+                device/overlay/Mu-Silicium/Resources \
+                device/overlay/Mu-Silicium/Silicium-ACPI ../Mu-Silicium/
+          cp -r ../Mu-Silicium/Binaries/enchilada ../Mu-Silicium/Binaries/judyp
+          python3 device/scripts/make-judyp-uefi.py ../Mu-Silicium
+        env:
+          MU_REF: ${{ inputs.mu_silicium_ref }}
+
+      - name: Verify the Qualcomm vendor binaries are present
+        run: |
+          files=$(find ../Mu-Silicium/Binaries/judyp -name '*.efi' 2>/dev/null | wc -l)
+          echo "Binaries/judyp: $files .efi file(s)"
+          if [ "$files" -lt 30 ]; then
+            echo "::error::the Binaries submodule is empty; the EDK II build cannot link the platform"
+            git -C ../Mu-Silicium submodule status Binaries || true
+            exit 1
+          fi
 
       - name: Build UniXNU package and firmware volume
         id: firmware
