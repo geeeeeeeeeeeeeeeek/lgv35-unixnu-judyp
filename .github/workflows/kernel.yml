@@ -214,7 +214,7 @@ jobs:
           off = {
               'XNU_OWNER_ROOT_AUDIT', 'XNU_OWNER_ROOT_TRUST', 'XNU_VERIFIED_ROOT_PROBE',
               'XNU_NATIVE_RAM_BLOCK', 'XNU_NATIVE_VIRTIO_BLOCK', 'XNU_NATIVE_UFS',
-              'XNU_NATIVE_LEGACY_DISPLAY', 'XNU_SHENG_PMGR', 'XNU_BOOT_PROGRESS',
+              'XNU_NATIVE_LEGACY_DISPLAY', 'XNU_SHENG_PMGR',
               'XNU_TRUST_CACHE_RUNTIME', 'XNU_OWNER_BOOT_MANIFEST', 'XNU_OWNER_DATA_MOUNT',
               'XNU_OWNER_CACHE_MOUNT', 'XNU_OWNER_CACHE_STARTUP', 'XNU_OWNER_CACHE_CARRIER',
           }
@@ -233,7 +233,7 @@ jobs:
           keep = ('build-corecrypto-14.py', 'build-arm-driver.py ArmDTPlatform',
                   'build-arm-driver.py ArmCpu', 'build-arm-driver.py NativeAES',
                   'build-native-aes-bindings.py', 'build-mockfs-fixture.py',
-                  'build-libpthread-kernel.py')
+                  'build-libpthread-kernel.py', 'build-boot-progress.py')
           lines = (root / 'board.toml').read_text().splitlines()
           start = next(i for i, l in enumerate(lines) if l.strip() == 'archives = [')
           end = next(i for i in range(start, len(lines)) if lines[i].strip() == ']')
