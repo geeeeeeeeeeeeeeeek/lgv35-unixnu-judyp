@@ -75,7 +75,8 @@ APRIORI DXE {
   INF MdeModulePkg/Universal/Console/ConSplitterDxe/ConSplitterDxe.inf
   INF MdeModulePkg/Universal/Console/GraphicsConsoleDxe/GraphicsConsoleDxe.inf
 
-  INF Binaries/judyp/QcomPkg/Drivers/ButtonsDxe/ButtonsDxe.inf
+  # ButtonsDxe spins on judyp (see DXE.inc): it must stay out of the APRIORI list as well.
+  # INF Binaries/judyp/QcomPkg/Drivers/ButtonsDxe/ButtonsDxe.inf
   INF Binaries/judyp/QcomPkg/Drivers/TsensDxe/TsensDxe.inf
 
 !if $(USE_CUSTOM_DISPLAY_DRIVER) == 1
