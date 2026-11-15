@@ -1,123 +1,134 @@
-Keep the IOKit root nub out of the type zones, and print each step of InitIOKit (judyp bring-up).
+Report where IOKit stops through the boot-progress panel, not printf, and keep the root nub out of the type zones
+(judyp bring-up).
 
-The previous round bracketed PE_lockdown_iokit, StartIOServiceMatching and the work loop allocation, and
-none of those lines appeared: the console still ends on "lockdown_mode: lockdown mode in nvram is off",
-which bsd/kern/lockdown_mode.c prints from its startup function, well before IOKit. The panel's stage row
-named PE_lockdown_iokit because the last frame the sampler caught was PE_init_iokit+0x388, and
-PE_lockdown_iokit is inlined into PE_init_iokit immediately after the two calls that follow that address:
+Two rounds of printfs placed after PE_init_iokit printed nothing, and this round's photograph shows why that is
+not evidence about IOKit. The panel's "Kernel console" section still ends on
 
-  0bf4d154  bl _InitIOKit
-  0bf4d158  bl _ConfigureIOKit
-  0bf4d1ac  bl _printf                 <- the trace the previous round added
-  0bf4d1b0  bl _zalloc_iokit_lockdown
-  0bf4d1bc  bl _printf
-  0bf4d1c0  bl _StartIOKitMatching
+  Serial requested, consistent debug disabled or debug boot arg not present, confi...
 
-So the boot never reaches PE_lockdown_iokit: it stops inside InitIOKit, one call earlier than the previous
-round assumed. The same photograph says why nothing progressed afterwards -- the panel froze at t=8s with
-DAIF=200, interrupts masked, which is the "IRQ-off hard lock" its own heading warns about -- and it also
-rules out a shortage, with 1188120 pages free.
+which osfmk/kdp/kdp_udp.c prints from kdp_serial_init during machine_startup -- that is, before PE_init_iokit runs.
+PE_init_iokit's first statement is PE_init_printf(TRUE), i.e. vcattach(), and from there the console belongs to the
+video console: vcattach() calls initialize_screen(NULL, kPEAcquireScreen) and replays msgbuf through vcputc().
+Nothing an IOKit printf or IOLog writes afterwards reaches the panel, so the six lines the previous round added to
+InitIOKit and the three in PE_lockdown_iokit could not have appeared even if the boot had passed them. What the same
+frame does say is unchanged: the stage row names PE_init_iokit (startup recording) and 1188562 pages are free, so the
+boot stops inside PE_init_iokit, with the interrupt mask set and no panic.
 
-InitIOKit (iokit/Kernel/IOStartIOKit.cpp) has exactly one step that allocates: gRootNub = new
-IOPlatformExpertDevice. IOPlatformExpertDevice::nw is a tail call into OSObject_typed_operator_new, which
-allocates through kalloc_type_impl_external, that is through a kalloc_type zone. A ticket lock taken there
-and never released is precisely a silent, panic-free, IRQ-off lock.
+So the instrumentation moves to the one channel that does not go through printf: package/BootProgress.c's
+boot_progress_stage(), which records the text as a stage and then paints the framebuffer from the caller while the
+monitor thread has not run (started && !thread_count). That paint happens synchronously at the breadcrumb, so it
+survives the IRQ-off hard lock the panel's own heading warns about, and the page already renders the last six stages:
+one photograph names the last step reached.
 
-Two changes, one round:
+Three changes:
 
-  1. OSObject_typed_operator_new stops using the type zone and takes every OSObject from kheap_alloc --
-     the path the plain OSObject::operator new has always used and the path operator delete frees to. If
-     the type zone is the fault, this boot continues past the root nub; if it does not, the type zones are
-     not implicated and the next round can leave them alone.
+  1. BC01..BC22 walk PE_init_iokit -> InitIOKit -> ConfigureIOKit and BC30..BC33 walk startIOServiceMatching, one
+     per step, so a stop is a step name instead of a function name; BC40..BC42 keep bracketing PE_lockdown_iokit.
 
-  2. InitIOKit reports after each of its steps and around the three calls that build the root nub, so a
-     boot that still stops names the step rather than the function. This is also what makes the first
-     change readable: the zalloc trace added last round is gated on native_wl_trace, and the gate now
-     opens at the root nub instead of at startIOServiceMatching, so the zone names print for the window
-     that matters.
+  2. "NATIVE_CTL: PE_init_iokit entered" is printed immediately before PE_init_printf(TRUE). It is the only printf
+     added, and it is the control that separates "the console dies at that statement" from "the boot never got
+     there" without another round.
 
-The prints are diagnostics and the gate closes again right after attach(); only the allocation change is
-behavioural.
+  3. OSObject_typed_operator_new still takes every OSObject from kheap_alloc instead of a kalloc_type zone
+     (unchanged, still the one behavioural change). If the boot now reaches BC17 the type-zone allocation inside
+     "new IOPlatformExpertDevice" is not the fault; if it stops between BC16 and BC17, it is.
+
+The previous round's zalloc trace is dropped: it printed through the same dead console.
 
 diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
-index d0149a6..30a8b62 100644
+index d0149a6..dfedeb0 100644
 --- a/iokit/Kernel/IOPlatformExpert.cpp
 +++ b/iokit/Kernel/IOPlatformExpert.cpp
 @@ -2086,15 +2086,24 @@ IOPlatformExpertDevice::init(void *dtRoot)
  	return true;
  }
  
-+extern "C" int native_wl_trace; /* NATIVE_SM: read by osfmk/kern/zalloc.c */
++/* UNI_BC: see the comment in iokit/Kernel/IOStartIOKit.cpp -- the boot-progress panel paints from
++ * the caller, printf/IOLog no longer reach the screen after PE_init_printf(TRUE). */
++extern "C" void boot_progress_stage(const char *text) __attribute__((weak_import));
++#define UNI_BC(text) do { if (boot_progress_stage) boot_progress_stage(text); } while (0)
 +
  bool
  IOPlatformExpertDevice::startIOServiceMatching(void)
  {
-+	native_wl_trace = 1;
-+	IOLog("NATIVE_SM: workLoop enter\n");
++	UNI_BC("BC30 startIOServiceMatching enter");
  	workLoop = IOWorkLoop::workLoop();
-+	IOLog("NATIVE_SM: workLoop=%p\n", workLoop);
++	UNI_BC("BC31 workLoop allocated");
  	if (!workLoop) {
-+		native_wl_trace = 0;
  		return false;
  	}
  
-+	IOLog("NATIVE_SM: registerService enter\n");
++	UNI_BC("BC32 registerService enter");
  	registerService();
-+	IOLog("NATIVE_SM: registerService done\n");
-+	native_wl_trace = 0;
++	UNI_BC("BC33 registerService done");
  
  	return true;
  }
 diff --git a/iokit/Kernel/IOStartIOKit.cpp b/iokit/Kernel/IOStartIOKit.cpp
-index d74c063..e9c9aa9 100644
+index d74c063..a11c591 100644
 --- a/iokit/Kernel/IOStartIOKit.cpp
 +++ b/iokit/Kernel/IOStartIOKit.cpp
-@@ -130,6 +130,8 @@ iokit_post_constructor_init(void)
+@@ -130,6 +130,15 @@ iokit_post_constructor_init(void)
   */
  void (*record_startup_extensions_function)(void) = NULL;
  
-+extern "C" int native_wl_trace; /* NATIVE_Z: defined in osfmk/kern/zalloc.c */
++/*
++ * UNI_BC: package/BootProgress.c records the text as a stage and paints the framebuffer from the
++ * caller while the monitor thread has not run, so the last breadcrumb survives a hard lock. IOLog is
++ * not usable here: PE_init_iokit has already called PE_init_printf(TRUE), which points PE_putc at
++ * the video console, and everything printed afterwards is dropped.
++ */
++extern "C" void boot_progress_stage(const char *text) __attribute__((weak_import));
++#define UNI_BC(text) do { if (boot_progress_stage) boot_progress_stage(text); } while (0)
 +
  void
  InitIOKit(void *dtTop)
  {
-@@ -144,23 +146,36 @@ InitIOKit(void *dtTop)
+@@ -143,31 +152,44 @@ InitIOKit(void *dtTop)
+ 	// of iokit basic service initialisation, or better we have IOLib stuff
  	// initialise as basic OS services.
  	//
++	UNI_BC("BC10 InitIOKit body");
  	IOLibInit();
-+	IOLog("NATIVE_II: IOLibInit\n");
++	UNI_BC("BC11 IOLibInit done");
  	OSlibkernInit();
-+	IOLog("NATIVE_II: OSlibkernInit\n");
++	UNI_BC("BC12 OSlibkernInit done");
  	IOMachPortInitialize();
-+	IOLog("NATIVE_II: IOMachPortInitialize\n");
++	UNI_BC("BC13 IOMachPortInitialize done");
  
  	gIOProgressBackbufferKey  = OSSymbol::withCStringNoCopy(kIOProgressBackbufferKey);
  	gIORemoveOnReadProperties = OSSet::withObjects((const OSObject **) &gIOProgressBackbufferKey, 1);
-+	IOLog("NATIVE_II: symbols\n");
++	UNI_BC("BC14 symbols done");
  
  	interruptAccountingInit();
-+	IOLog("NATIVE_II: interruptAccountingInit\n");
-+
-+	/* NATIVE_Z: the zalloc trace in osfmk/kern/zalloc.c is gated; open it for the rest of the
-+	 * root nub construction, which is where the last frames before the stop are. */
-+	native_wl_trace = 1;
++	UNI_BC("BC15 interruptAccountingInit done");
  
++	UNI_BC("BC16 new IOPlatformExpertDevice");
  	gRootNub = new IOPlatformExpertDevice;
-+	IOLog("NATIVE_II: new root nub %p\n", gRootNub);
++	UNI_BC("BC17 root nub allocated");
  	if (__improbable(gRootNub == NULL)) {
  		panic("Failed to allocate IOKit root nub");
  	}
++	UNI_BC("BC18 root nub init");
  	bool ok = gRootNub->init(dtTop);
-+	IOLog("NATIVE_II: root nub init %d\n", ok);
++	UNI_BC("BC19 root nub inited");
  	if (__improbable(!ok)) {
  		panic("Failed to initialize IOKit root nub");
  	}
  	gRootNub->attach(NULL);
-+	IOLog("NATIVE_II: root nub attached\n");
-+	native_wl_trace = 0;
++	UNI_BC("BC20 root nub attached");
  
  	/* If the bootstrap segment set up a function to record startup
  	 * extensions, call it now.
+ 	 */
+ 	if (record_startup_extensions_function) {
++		UNI_BC("BC21 record_startup_extensions");
+ 		record_startup_extensions_function();
+ 	}
++	UNI_BC("BC22 InitIOKit tail");
+ }
+ 
+ void
 diff --git a/libkern/c++/OSObject.cpp b/libkern/c++/OSObject.cpp
 index cd00373..6611c9a 100644
 --- a/libkern/c++/OSObject.cpp
@@ -153,70 +164,60 @@ index cd00373..6611c9a 100644
  	assert(mem);
  	OSIVAR_ACCUMSIZE(size);
  
-diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
-index a6bc01a..24fc621 100644
---- a/osfmk/kern/zalloc.c
-+++ b/osfmk/kern/zalloc.c
-@@ -4760,6 +4760,8 @@ zone_page_prot(zone_security_flags_t zsflags)
- 	}
- }
- 
-+int native_wl_trace; /* NATIVE_Z: set by IOPlatformExpertDevice::startIOServiceMatching */
-+
- static void
- zone_expand_locked(zone_t z, zalloc_flags_t flags)
- {
-@@ -4849,10 +4851,10 @@ zone_expand_locked(zone_t z, zalloc_flags_t flags)
- 			zone_meta_lock_in_partial(z, meta, cur_pages);
- 		}
- 		zone_unlock(z);
--
--		/*
--		 * And now allocate pages to populate our VA.
--		 */
-+		if (native_wl_trace) {
-+			printf("NATIVE_Z: expand zone=%s addr=%lx chunk=%u cur=%u\n",
-+			    z->z_name, (unsigned long)addr, z->z_chunk_pages, cur_pages);
-+		}
- 		min_pages = z->z_chunk_pages;
- #if !KASAN_CLASSIC
- 		if (!z->z_percpu) {
-@@ -4943,6 +4945,10 @@ zone_expand_locked(zone_t z, zalloc_flags_t flags)
- 		    addr + ptoa(cur_pages), addr + ptoa(cur_pages), ptoa(pages), page_list,
- 		    zone_kma_flags(z, zsflags, flags), VM_KERN_MEMORY_ZONE,
- 		    zone_page_prot(zsflags), zone_mapping_type(z));
-+		if (native_wl_trace) {
-+			printf("NATIVE_Z: populate done zone=%s pages=%u cur=%u\n",
-+			    z->z_name, pages, cur_pages);
-+		}
- 
- 		ZONE_TRACE_VM_KERN_REQUEST_END(pages);
- 
-@@ -6846,6 +6852,11 @@ zalloc_ext(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
- 	    debug_mode_active(),
- 	    "Calling {k,z}alloc from interrupt disabled context isn't allowed");
- 
-+	if (native_wl_trace) {
-+		printf("NATIVE_Z: ext zone=%s free=%u\n", zone->z_name,
-+		    (unsigned)zone->z_elems_free);
-+	}
-+
- 	/*
- 	 * Make sure Z_NOFAIL was not obviously misused
- 	 */
 diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
-index 433b6cd..1356bd2 100644
+index 433b6cd..af1d02d 100644
 --- a/pexpert/arm/pe_init.c
 +++ b/pexpert/arm/pe_init.c
-@@ -390,8 +390,11 @@ PE_lockdown_iokit(void)
+@@ -44,6 +44,17 @@ char iBoot_version[FW_VERS_LEN];
+ char iBoot_Stage_2_version[FW_VERS_LEN];
+ #endif /* defined(TARGET_OS_OSX) && defined(__arm64__) */
+ 
++/*
++ * UNI_BC: breadcrumbs go through the boot-progress panel (package/BootProgress.c), which records the
++ * text as a stage and then *paints the framebuffer from the caller* while the monitor thread has not
++ * run yet -- so the last breadcrumb stays readable even if the CPU hard-locks with interrupts masked.
++ * printf cannot be used here: PE_init_iokit's first statement is PE_init_printf(TRUE), which points
++ * PE_putc at the video console, and every printf after that point is dropped (that is why the panel's
++ * "Kernel console" section ends at the kdp_serial_init line of machine_startup).
++ */
++extern void boot_progress_stage(const char *text) __attribute__((weak_import));
++#define UNI_BC(text) do { if (boot_progress_stage) boot_progress_stage(text); } while (0)
++
+ /*
+  * This variable is only modified once, when the BSP starts executing. We put it in __DATA_CONST
+  * as page protections on kernel text early in startup are read-write. The kernel is
+@@ -255,6 +266,10 @@ PE_init_iokit(void)
+ 	uint32_t        load_kernel_start_value = 0;
+ 	uint32_t        populate_registry_time_value = 0;
+ 
++	/* UNI_BC: the last printf that can still reach the panel console, kept as a control: it proves
++	 * the console dies at the next statement rather than the boot never getting here. */
++	printf("NATIVE_CTL: PE_init_iokit entered\n");
++	UNI_BC("BC01 PE_init_iokit enter");
+ 	PE_init_printf(TRUE);
+ 
+ 	printf("iBoot version: %s\n", iBoot_version);
+@@ -371,8 +386,11 @@ PE_init_iokit(void)
+ #endif
+ 	}
+ 
++	UNI_BC("BC02 InitIOKit enter");
+ 	InitIOKit(PE_state.deviceTreeHead);
++	UNI_BC("BC03 InitIOKit returned");
+ 	ConfigureIOKit();
++	UNI_BC("BC04 ConfigureIOKit returned");
+ }
+ 
+ void
+@@ -390,8 +408,11 @@ PE_lockdown_iokit(void)
  	 * against a kernel which has not yet enabled the full set of available
  	 * hardware protections.
  	 */
-+	printf("NATIVE_PE: lockdown enter\n");
++	UNI_BC("BC40 PE_lockdown_iokit enter");
  	zalloc_iokit_lockdown();
-+	printf("NATIVE_PE: lockdown zone ready\n");
++	UNI_BC("BC41 zalloc_iokit_lockdown returned");
  	StartIOKitMatching();
-+	printf("NATIVE_PE: matching returned\n");
++	UNI_BC("BC42 StartIOKitMatching returned");
  }
  
  void
