@@ -273,6 +273,8 @@ enum { GicdPa = 0x17a00000, GicrPa = 0x17a60000, GicdBytes = 0x10000, GicrBytes 
 volatile unsigned bp_egic_state, bp_egic_error, bp_egic_irqs, bp_egic_other;
 volatile uint32_t bp_egic_regs[6];   // GICD_CTLR, GICR_TYPER affinity, GICR_WAKER, GICR_ISENABLER0, ICC_PMR_EL1, ICC_IGRPEN1_EL1
 static uintptr_t bp_egic_gicd, bp_egic_redist;
+// Not declared by the headers this file pulls in; ArmCpu.cpp calls it the same way (timer ISR).
+extern void rtclock_intr(void *);
 
 static inline uint32_t egic_rd(uintptr_t base, unsigned offset) { return *(volatile uint32_t *)(base + offset); }
 static inline void egic_wr(uintptr_t base, unsigned offset, uint32_t value) {
