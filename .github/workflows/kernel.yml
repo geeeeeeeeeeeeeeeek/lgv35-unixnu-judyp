@@ -70,6 +70,16 @@ on:
         required: false
         type: boolean
         default: false
+      seed_warm:
+        description: >-
+          Reuse the seed prelink that the restore step falls back to instead of building one. Only
+          for a round that changes kernel code without changing which archives the kernel pulls in:
+          a print in a driver, a tweak inside one of the device patches. The prelink report the audit
+          reads does not depend on that, so the previous round's seed is still accurate. Saves the
+          seed build, which is a full kernel build in disguise (the longest single step of a round).
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -241,7 +251,7 @@ jobs:
             seed-
 
       - name: Build a seed kernel for the prelink audits
-        if: steps.seedcache.outputs.cache-hit != 'true'
+        if: steps.seedcache.outputs.cache-hit != 'true' && !inputs.seed_warm
         env:
           UNIXNU_UEFI: ${{ github.workspace }}/../Mu-Silicium
           # prepare-xnu-source.py runs inside the bootstrap pass and calls the GitHub API for the
