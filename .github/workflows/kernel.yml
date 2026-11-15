@@ -439,7 +439,7 @@ jobs:
           retention-days: 7
 
       - name: Upload boot image and firmware volume
-        if: always() && steps.bootimg.outcome == 'success'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: judyp-bootimg
