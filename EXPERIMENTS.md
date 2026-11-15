@@ -341,6 +341,10 @@
 - **改成公开后一次跑通到第 26 步**：run 43683477666（`b2c13efd`）步骤 1–22 全 success，`Pack the boot images`、`Upload kernel`、`Upload payload` 都拿到了产物，只剩最后一个上传失败。
 - **`boot.img` 的 shim 头**：`BootShim.S` 里 Image Size 写的是 `.quad FD_SIZE`，而 `bootimg.py` 会校验 offset 8 那句必须是「shim 长度 + 固件卷大小」，否则 `the ARM64 image header does not describe the shim plus the firmware volume`。`make-judyp-uefi.py` 幂等地把它替换成 `.quad FD_SIZE + (_Payload - _Head)`。
 - **`upload-artifact` 不接受 `..`**：`Upload boot image and firmware volume` 直接写 `../Mu-Silicium/Build/judypPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd` 会报 `Invalid pattern ... Relative pathing '.' and '..' is not allowed`（工作区外的路径一律拒绝，哪怕存在）。现在 `Pack the boot images` 末尾先把它 `cp` 到 `out/judyp/boot/SILICIUM_UEFI.fd` 再上传。
+- **种子步骤要带 token**：run 43685719694 在种子步骤死在 `prepare-xnu-source.py` → `urllib.error.HTTPError: HTTP Error 403: rate limit exceeded`。原因不是我们的配额，而是匿名访问 `api.github.com` 的共享限额：`build-xnu-4k-baseline.sh` 的 bootstrap pass 会拉 Apple 的 DriverKit 头文件，脚本只在 `GITHUB_TOKEN`/`GH_TOKEN` 存在时才加 `Authorization`。给该步骤补了 `GITHUB_TOKEN: ${{ github.token }}`（`Build kernel` 本来就有，种子步骤漏了）。
+- **run 43686484135（`9e52f8d8`）全绿**：1–27 步全部 success，产物：`kernel.macho` 126,144,512 B、`payload.img` 150,994,944 B、`no-ramdisk/boot.img` 1,753,088 B（`ANDROID!`）、`with-ramdisk/boot.img` 152,748,032 B、`SILICIUM_UEFI.fd` 3,145,728 B。payload 的 `kernel_args` 里能看到 `pmgr=2`、`native-ufs-root=1`、`sheng-aks=1`。
+- **增量构建**：runner 是干净虚拟机，没有 Docker 层；等价物是 `actions/cache`。已加两层（`e621fe06`）：`out/ipsw`（key = `board.toml` 哈希）和 `out-seed`（key = `configs/kits/package/patches/overlay/scripts` 哈希 + refs + Xcode）。命中时跳过种子构建（约 5 分钟）；XNU 编译本身跨机器没有增量支持，暂不缓存对象目录。
+- **下载产物的网络**：WSL 直连 GitHub artifact 存储只有 ~40 KB/s（8 MiB 要 206 s），走 Windows 侧代理 `http://172.20.128.1:111` 是 ~1.2 MB/s（同一 8 MiB 只要 6.8 s），30 倍差距。`dl-resume.sh` 现在支持 `PROXY=` 环境变量 + `curl -C -` 断点续传。
 
 
 
