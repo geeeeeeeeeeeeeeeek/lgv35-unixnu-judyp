@@ -1,0 +1,132 @@
+Bracket the IOKit matching path, and the zone expansion underneath it, with console lines (judyp instrument).
+
+The phone stops on every image with PE_lockdown_iokit as the deepest resolvable stage and
+"lockdown_mode: lockdown mode in nvram is off" as the last console line. That line is printed by
+bsd/kern/lockdown_mode.c long before pexpert/arm/pe_init.c calls zalloc_iokit_lockdown() and
+StartIOKitMatching(), so the stop is somewhere inside PE_lockdown_iokit and the console has said
+nothing since.
+
+Disassembly of the prelink narrows that range to four calls and no further: PE_lockdown_iokit only
+calls zalloc_iokit_lockdown (a single store, it cannot block) and StartIOKitMatching;
+StartIOKitMatching calls IOPlatformExpertDevice::startIOServiceMatching, which allocates the
+singleton work loop with IOWorkLoop::workLoop(); that allocation goes through
+OSObject_typed_operator_new -> kalloc_type_impl_external -> zalloc_ext, and zalloc_ext takes its slow
+path (zone_expand_locked -> zalloc_item) because a type zone is empty on its first allocation. Which
+of those four brackets the stop cannot be told from a photograph, and one boot costs a CI run.
+
+So each bracket prints. PE_lockdown_iokit reports before and after zalloc_iokit_lockdown and after
+StartIOKitMatching returns; startIOServiceMatching reports before and after workLoop and around
+registerService. Those three lines alone separate "the zone cannot be created", "the work loop cannot
+be allocated" and "the work loop cannot be registered".
+
+Inside zalloc, the prints are gated on native_wl_trace, which startIOServiceMatching sets for the
+duration of workLoop and registerService and clears afterwards: zalloc_ext is a hot path and an
+ungated print there would flood the ring and slow the very allocation being measured. With the gate
+open, zalloc_ext names the zone it is asked for and its free count, and zone_expand_locked reports
+the two lock-free points that bracket the page supply: the VA it is about to populate, and the
+completion of kernel_memory_populate_object_and_unlock. Nothing is printed while the zone lock is
+held, because kprintf can block and the measurement must not introduce a deadlock of its own. A run
+that ends on "expand zone=..." without "populate done" puts the stop in the page supply; a run that
+ends on "ext zone=..." without "expand" puts it before the page supply, in the zone lock or in
+zalloc_item's own bookkeeping.
+
+These are diagnostics only: no return value, no state and no policy changes, the gate is closed again
+before the boot continues, and every line carries the NATIVE_PE / NATIVE_SM / NATIVE_Z prefix so it
+can be filtered out of a boot log.
+
+diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
+index d0149a6..30a8b62 100644
+--- a/iokit/Kernel/IOPlatformExpert.cpp
++++ b/iokit/Kernel/IOPlatformExpert.cpp
+@@ -2086,15 +2086,24 @@ IOPlatformExpertDevice::init(void *dtRoot)
+ 	return true;
+ }
+ 
++extern "C" int native_wl_trace; /* NATIVE_SM: read by osfmk/kern/zalloc.c */
++
+ bool
+ IOPlatformExpertDevice::startIOServiceMatching(void)
+ {
++	native_wl_trace = 1;
++	IOLog("NATIVE_SM: workLoop enter\n");
+ 	workLoop = IOWorkLoop::workLoop();
++	IOLog("NATIVE_SM: workLoop=%p\n", workLoop);
+ 	if (!workLoop) {
++		native_wl_trace = 0;
+ 		return false;
+ 	}
+ 
++	IOLog("NATIVE_SM: registerService enter\n");
+ 	registerService();
++	IOLog("NATIVE_SM: registerService done\n");
++	native_wl_trace = 0;
+ 
+ 	return true;
+ }
+diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
+index a6bc01a..24fc621 100644
+--- a/osfmk/kern/zalloc.c
++++ b/osfmk/kern/zalloc.c
+@@ -4760,6 +4760,8 @@ zone_page_prot(zone_security_flags_t zsflags)
+ 	}
+ }
+ 
++int native_wl_trace; /* NATIVE_Z: set by IOPlatformExpertDevice::startIOServiceMatching */
++
+ static void
+ zone_expand_locked(zone_t z, zalloc_flags_t flags)
+ {
+@@ -4849,10 +4851,10 @@ zone_expand_locked(zone_t z, zalloc_flags_t flags)
+ 			zone_meta_lock_in_partial(z, meta, cur_pages);
+ 		}
+ 		zone_unlock(z);
+-
+-		/*
+-		 * And now allocate pages to populate our VA.
+-		 */
++		if (native_wl_trace) {
++			printf("NATIVE_Z: expand zone=%s addr=%lx chunk=%u cur=%u\n",
++			    z->z_name, (unsigned long)addr, z->z_chunk_pages, cur_pages);
++		}
+ 		min_pages = z->z_chunk_pages;
+ #if !KASAN_CLASSIC
+ 		if (!z->z_percpu) {
+@@ -4943,6 +4945,10 @@ zone_expand_locked(zone_t z, zalloc_flags_t flags)
+ 		    addr + ptoa(cur_pages), addr + ptoa(cur_pages), ptoa(pages), page_list,
+ 		    zone_kma_flags(z, zsflags, flags), VM_KERN_MEMORY_ZONE,
+ 		    zone_page_prot(zsflags), zone_mapping_type(z));
++		if (native_wl_trace) {
++			printf("NATIVE_Z: populate done zone=%s pages=%u cur=%u\n",
++			    z->z_name, pages, cur_pages);
++		}
+ 
+ 		ZONE_TRACE_VM_KERN_REQUEST_END(pages);
+ 
+@@ -6846,6 +6852,11 @@ zalloc_ext(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
+ 	    debug_mode_active(),
+ 	    "Calling {k,z}alloc from interrupt disabled context isn't allowed");
+ 
++	if (native_wl_trace) {
++		printf("NATIVE_Z: ext zone=%s free=%u\n", zone->z_name,
++		    (unsigned)zone->z_elems_free);
++	}
++
+ 	/*
+ 	 * Make sure Z_NOFAIL was not obviously misused
+ 	 */
+diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
+index 433b6cd..1356bd2 100644
+--- a/pexpert/arm/pe_init.c
++++ b/pexpert/arm/pe_init.c
+@@ -390,8 +390,11 @@ PE_lockdown_iokit(void)
+ 	 * against a kernel which has not yet enabled the full set of available
+ 	 * hardware protections.
+ 	 */
++	printf("NATIVE_PE: lockdown enter\n");
+ 	zalloc_iokit_lockdown();
++	printf("NATIVE_PE: lockdown zone ready\n");
+ 	StartIOKitMatching();
++	printf("NATIVE_PE: matching returned\n");
+ }
+ 
+ void
