@@ -30,9 +30,28 @@ SEC_GUID_LINE = (
     '  gSiliciumEntryArgHobGuid            = { 0xDAEE82E6, 0x8090, 0x4E72, '
     '{ 0xBF, 0xB9, 0x78, 0xC1, 0x3C, 0xD4, 0xE3, 0x59 } }\n')
 
+# BootShim.S fills the ARM64 image header with FD_SIZE alone, but unixnu bootimg refuses an image whose
+# header does not describe the shim plus the firmware volume, and the header is what the bootloader uses
+# to size the image. Both labels sit in the default .text section, so the shim length is an assembly-time
+# constant here.
+SHIM_SIZE_LINE = '  .quad FD_SIZE         /* Image Size */'
+SHIM_SIZE_PATCHED = '  .quad FD_SIZE + (_Payload - _Head)  /* Image Size: shim plus firmware volume */'
+
 
 def read(path):
     return path.read_text(encoding='utf-8'), None
+
+
+def declare_boot_shim_size(uefi):
+    """Make the shim's ARM64 header describe the whole image, as unixnu bootimg verifies."""
+    shim = uefi / 'BootShim/BootShim.S'
+    text = shim.read_text(encoding='utf-8')
+    if SHIM_SIZE_LINE not in text:
+        if SHIM_SIZE_PATCHED in text:
+            return
+        raise SystemExit(f'neither the stock nor the patched image size line is in {shim}')
+    shim.write_text(text.replace(SHIM_SIZE_LINE, SHIM_SIZE_PATCHED), encoding='utf-8')
+    print('BootShim/BootShim.S: image size now covers the shim plus the firmware volume')
 
 
 def declare_entry_arg_guid(uefi):
@@ -65,6 +84,7 @@ def main():
         raise SystemExit(f'{MARKER} missing from judyp.dsc; the package is incomplete')
 
     declare_entry_arg_guid(uefi)
+    declare_boot_shim_size(uefi)
 
     dts = uefi / DTS
     if not dts.is_file():
