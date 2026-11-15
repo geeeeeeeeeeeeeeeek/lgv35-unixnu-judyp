@@ -408,6 +408,10 @@ jobs:
           ./unixnu bootimg --uefi ../Mu-Silicium \
             --dtb ../Mu-Silicium/Resources/DTBs/judyp.dtb \
             --ramdisk none -o out/judyp/boot/no-ramdisk/boot.img
+          # upload-artifact rejects any path with '..' in it ("Relative pathing '.' and '..' is not
+          # allowed"), so the firmware volume the images were packed from is copied inside the
+          # workspace and uploaded from there.
+          cp ../Mu-Silicium/Build/judypPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd out/judyp/boot/SILICIUM_UEFI.fd
 
       - name: Build the userdata image
         id: userdata
@@ -448,7 +452,7 @@ jobs:
             out/judyp/boot/with-ramdisk/boot.json
             out/judyp/boot/no-ramdisk/boot.img
             out/judyp/boot/no-ramdisk/boot.json
-            ../Mu-Silicium/Build/judypPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd
+            out/judyp/boot/SILICIUM_UEFI.fd
           if-no-files-found: warn
           retention-days: 7
 
