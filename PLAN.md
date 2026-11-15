@@ -55,11 +55,14 @@
 - **验证条件**：UEFI 菜单在 V35 屏幕上点亮（或串口确认 UEFI 启动到 DXE 完毕）
 - **风险兜底**：若 LG 面板初始化失败，SimpleFbDxe + cont_splash 继承路径（ABL 已点亮的 framebuffer 直接复用）大概率可显示
 
-### M4 内核上线（macOS runner + fastboot boot）
-- [ ] enchilada_defconfig fork 为 judyp_defconfig（DTS/机器 ID 差异）
-- [ ] GitHub Actions macOS runner 构建 kernelcache（fork 主仓库或用 enchilada 的 workflow 模式）
-- [ ] payload（ADT/trust cache/DarwinBoot）→ fastboot boot → XNU 串口日志
-- **验证条件**：XNU 启动日志出现在串口（到 launchd 之前即可算里程碑达成）
+### M4 内核上线（GitHub Actions macOS runner + fastboot boot）
+- [x] judyp_defconfig（= enchilada 配置原样，理由见其文件头）
+- [x] CI 适配：`.github/workflows/kernel.yml` 套用 `overlay/Mu-Silicium`、镜像 `Binaries/judyp`、产物 `out/judyp`、artifact `judyp-*`
+- [x] 私有仓库 `geeeeeeeeeeeeeeeek/lgv35-unixnu-judyp` + 首次 `workflow_dispatch`
+- [x] 第一颗 kernel.macho / payload.img / boot.img 从 CI 取回（run 43686484135，全部步骤 success，产物在 `out/ci2`）
+- [ ] payload.img → `fastboot flash system_a`，空 ramdisk boot.img → `fastboot boot`，看屏幕日志
+- **验证条件**：XNU 启动日志出现在屏幕（到 launchd 之前即可算里程碑达成）
+- **已知门槛**：payload 卷 144 MiB（route 2 独立分区）；首次 `fastboot boot` 后才允许第二次，中间要 `reboot-bootloader`
 
 ### M5 可用性（远期）
 - 触控 ftm4 驱动移植（enchilada 的 Rmi4Touch 换 FocalTech 协议）
