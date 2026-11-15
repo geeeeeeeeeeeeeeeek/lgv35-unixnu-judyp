@@ -213,13 +213,16 @@ jobs:
           set -eu
           cp device/board.toml /tmp/board.toml.device
           python3 - <<'PY'
+          import os
           import pathlib
           import re
 
           root = pathlib.Path('device')
           off = {'XNU_SHENG_PMGR', 'XNU_NATIVE_LEGACY_DISPLAY'}
+          # The stub archive lives outside the build tree, so it is named absolutely; {tree} would not
+          # resolve for a plain archives entry anyway.
           extra = ('-Wl,-force_load,{tree}/build/enchilada-dwc3/libNativeDwc3.a '
-                   '-Wl,-force_load,{tree}/build/seed-stubs/libSeedStubs.a')
+                   f"-Wl,-force_load,{os.environ['GITHUB_WORKSPACE']}/build/seed-stubs/libSeedStubs.a")
           out = []
           for line in (root / 'configs/judyp_defconfig').read_text().splitlines():
               m = re.match(r'CONFIG_(\w+)=', line)
