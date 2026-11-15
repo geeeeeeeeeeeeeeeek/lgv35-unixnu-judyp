@@ -1,0 +1,222 @@
+Keep the IOKit root nub out of the type zones, and print each step of InitIOKit (judyp bring-up).
+
+The previous round bracketed PE_lockdown_iokit, StartIOServiceMatching and the work loop allocation, and
+none of those lines appeared: the console still ends on "lockdown_mode: lockdown mode in nvram is off",
+which bsd/kern/lockdown_mode.c prints from its startup function, well before IOKit. The panel's stage row
+named PE_lockdown_iokit because the last frame the sampler caught was PE_init_iokit+0x388, and
+PE_lockdown_iokit is inlined into PE_init_iokit immediately after the two calls that follow that address:
+
+  0bf4d154  bl _InitIOKit
+  0bf4d158  bl _ConfigureIOKit
+  0bf4d1ac  bl _printf                 <- the trace the previous round added
+  0bf4d1b0  bl _zalloc_iokit_lockdown
+  0bf4d1bc  bl _printf
+  0bf4d1c0  bl _StartIOKitMatching
+
+So the boot never reaches PE_lockdown_iokit: it stops inside InitIOKit, one call earlier than the previous
+round assumed. The same photograph says why nothing progressed afterwards -- the panel froze at t=8s with
+DAIF=200, interrupts masked, which is the "IRQ-off hard lock" its own heading warns about -- and it also
+rules out a shortage, with 1188120 pages free.
+
+InitIOKit (iokit/Kernel/IOStartIOKit.cpp) has exactly one step that allocates: gRootNub = new
+IOPlatformExpertDevice. IOPlatformExpertDevice::nw is a tail call into OSObject_typed_operator_new, which
+allocates through kalloc_type_impl_external, that is through a kalloc_type zone. A ticket lock taken there
+and never released is precisely a silent, panic-free, IRQ-off lock.
+
+Two changes, one round:
+
+  1. OSObject_typed_operator_new stops using the type zone and takes every OSObject from kheap_alloc --
+     the path the plain OSObject::operator new has always used and the path operator delete frees to. If
+     the type zone is the fault, this boot continues past the root nub; if it does not, the type zones are
+     not implicated and the next round can leave them alone.
+
+  2. InitIOKit reports after each of its steps and around the three calls that build the root nub, so a
+     boot that still stops names the step rather than the function. This is also what makes the first
+     change readable: the zalloc trace added last round is gated on native_wl_trace, and the gate now
+     opens at the root nub instead of at startIOServiceMatching, so the zone names print for the window
+     that matters.
+
+The prints are diagnostics and the gate closes again right after attach(); only the allocation change is
+behavioural.
+
+diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
+index d0149a6..30a8b62 100644
+--- a/iokit/Kernel/IOPlatformExpert.cpp
++++ b/iokit/Kernel/IOPlatformExpert.cpp
+@@ -2086,15 +2086,24 @@ IOPlatformExpertDevice::init(void *dtRoot)
+ 	return true;
+ }
+ 
++extern "C" int native_wl_trace; /* NATIVE_SM: read by osfmk/kern/zalloc.c */
++
+ bool
+ IOPlatformExpertDevice::startIOServiceMatching(void)
+ {
++	native_wl_trace = 1;
++	IOLog("NATIVE_SM: workLoop enter\n");
+ 	workLoop = IOWorkLoop::workLoop();
++	IOLog("NATIVE_SM: workLoop=%p\n", workLoop);
+ 	if (!workLoop) {
++		native_wl_trace = 0;
+ 		return false;
+ 	}
+ 
++	IOLog("NATIVE_SM: registerService enter\n");
+ 	registerService();
++	IOLog("NATIVE_SM: registerService done\n");
++	native_wl_trace = 0;
+ 
+ 	return true;
+ }
+diff --git a/iokit/Kernel/IOStartIOKit.cpp b/iokit/Kernel/IOStartIOKit.cpp
+index d74c063..e9c9aa9 100644
+--- a/iokit/Kernel/IOStartIOKit.cpp
++++ b/iokit/Kernel/IOStartIOKit.cpp
+@@ -130,6 +130,8 @@ iokit_post_constructor_init(void)
+  */
+ void (*record_startup_extensions_function)(void) = NULL;
+ 
++extern "C" int native_wl_trace; /* NATIVE_Z: defined in osfmk/kern/zalloc.c */
++
+ void
+ InitIOKit(void *dtTop)
+ {
+@@ -144,23 +146,36 @@ InitIOKit(void *dtTop)
+ 	// initialise as basic OS services.
+ 	//
+ 	IOLibInit();
++	IOLog("NATIVE_II: IOLibInit\n");
+ 	OSlibkernInit();
++	IOLog("NATIVE_II: OSlibkernInit\n");
+ 	IOMachPortInitialize();
++	IOLog("NATIVE_II: IOMachPortInitialize\n");
+ 
+ 	gIOProgressBackbufferKey  = OSSymbol::withCStringNoCopy(kIOProgressBackbufferKey);
+ 	gIORemoveOnReadProperties = OSSet::withObjects((const OSObject **) &gIOProgressBackbufferKey, 1);
++	IOLog("NATIVE_II: symbols\n");
+ 
+ 	interruptAccountingInit();
++	IOLog("NATIVE_II: interruptAccountingInit\n");
++
++	/* NATIVE_Z: the zalloc trace in osfmk/kern/zalloc.c is gated; open it for the rest of the
++	 * root nub construction, which is where the last frames before the stop are. */
++	native_wl_trace = 1;
+ 
+ 	gRootNub = new IOPlatformExpertDevice;
++	IOLog("NATIVE_II: new root nub %p\n", gRootNub);
+ 	if (__improbable(gRootNub == NULL)) {
+ 		panic("Failed to allocate IOKit root nub");
+ 	}
+ 	bool ok = gRootNub->init(dtTop);
++	IOLog("NATIVE_II: root nub init %d\n", ok);
+ 	if (__improbable(!ok)) {
+ 		panic("Failed to initialize IOKit root nub");
+ 	}
+ 	gRootNub->attach(NULL);
++	IOLog("NATIVE_II: root nub attached\n");
++	native_wl_trace = 0;
+ 
+ 	/* If the bootstrap segment set up a function to record startup
+ 	 * extensions, call it now.
+diff --git a/libkern/c++/OSObject.cpp b/libkern/c++/OSObject.cpp
+index cd00373..6611c9a 100644
+--- a/libkern/c++/OSObject.cpp
++++ b/libkern/c++/OSObject.cpp
+@@ -324,19 +324,17 @@ OSObject_typed_operator_new(kalloc_type_view_t ktv, vm_size_t size)
+ 	 * using the parent's operator new/delete. If we detect such
+ 	 * a case we default to using kalloc rather than kalloc_type
+ 	 */
+-	void *mem = NULL;
+-	if (size <= kalloc_type_get_size(ktv->kt_size)) {
+-		/*
+-		 * OSObject_typed_operator_new can be called from kexts,
+-		 * use the external symbol for kalloc_type_impl as
+-		 * kalloc_type_views generated at some external callsites
+-		 * many not have been processed during boot.
+-		 */
+-		mem = kalloc_type_impl_external(ktv, Z_WAITOK_ZERO);
+-	} else {
+-		mem = kheap_alloc(KHEAP_DEFAULT, size,
+-		    Z_VM_TAG_BT(Z_WAITOK_ZERO, VM_KERN_MEMORY_LIBKERN));
+-	}
++	/*
++	 * NATIVE_NEW: on judyp the boot stops in the first kalloc_type allocation -- InitIOKit ->
++	 * new IOPlatformExpertDevice -> OSObject_typed_operator_new -> kalloc_type_impl_external ->
++	 * zalloc_ext -> zone_expand_locked, with interrupts masked and no panic. To tell "the type
++	 * zone is the problem" apart from "any allocation under this call is the problem", every
++	 * OSObject is taken from kheap_alloc here, which is the path operator delete already frees
++	 * to, and which the plain OSObject::operator new above has always used.
++	 */
++	(void)ktv;
++	void *mem = kheap_alloc(KHEAP_DEFAULT, size,
++	    Z_VM_TAG_BT(Z_WAITOK_ZERO, VM_KERN_MEMORY_LIBKERN));
+ 	assert(mem);
+ 	OSIVAR_ACCUMSIZE(size);
+ 
+diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
+index a6bc01a..24fc621 100644
+--- a/osfmk/kern/zalloc.c
++++ b/osfmk/kern/zalloc.c
+@@ -4760,6 +4760,8 @@ zone_page_prot(zone_security_flags_t zsflags)
+ 	}
+ }
+ 
++int native_wl_trace; /* NATIVE_Z: set by IOPlatformExpertDevice::startIOServiceMatching */
++
+ static void
+ zone_expand_locked(zone_t z, zalloc_flags_t flags)
+ {
+@@ -4849,10 +4851,10 @@ zone_expand_locked(zone_t z, zalloc_flags_t flags)
+ 			zone_meta_lock_in_partial(z, meta, cur_pages);
+ 		}
+ 		zone_unlock(z);
+-
+-		/*
+-		 * And now allocate pages to populate our VA.
+-		 */
++		if (native_wl_trace) {
++			printf("NATIVE_Z: expand zone=%s addr=%lx chunk=%u cur=%u\n",
++			    z->z_name, (unsigned long)addr, z->z_chunk_pages, cur_pages);
++		}
+ 		min_pages = z->z_chunk_pages;
+ #if !KASAN_CLASSIC
+ 		if (!z->z_percpu) {
+@@ -4943,6 +4945,10 @@ zone_expand_locked(zone_t z, zalloc_flags_t flags)
+ 		    addr + ptoa(cur_pages), addr + ptoa(cur_pages), ptoa(pages), page_list,
+ 		    zone_kma_flags(z, zsflags, flags), VM_KERN_MEMORY_ZONE,
+ 		    zone_page_prot(zsflags), zone_mapping_type(z));
++		if (native_wl_trace) {
++			printf("NATIVE_Z: populate done zone=%s pages=%u cur=%u\n",
++			    z->z_name, pages, cur_pages);
++		}
+ 
+ 		ZONE_TRACE_VM_KERN_REQUEST_END(pages);
+ 
+@@ -6846,6 +6852,11 @@ zalloc_ext(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
+ 	    debug_mode_active(),
+ 	    "Calling {k,z}alloc from interrupt disabled context isn't allowed");
+ 
++	if (native_wl_trace) {
++		printf("NATIVE_Z: ext zone=%s free=%u\n", zone->z_name,
++		    (unsigned)zone->z_elems_free);
++	}
++
+ 	/*
+ 	 * Make sure Z_NOFAIL was not obviously misused
+ 	 */
+diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
+index 433b6cd..1356bd2 100644
+--- a/pexpert/arm/pe_init.c
++++ b/pexpert/arm/pe_init.c
+@@ -390,8 +390,11 @@ PE_lockdown_iokit(void)
+ 	 * against a kernel which has not yet enabled the full set of available
+ 	 * hardware protections.
+ 	 */
++	printf("NATIVE_PE: lockdown enter\n");
+ 	zalloc_iokit_lockdown();
++	printf("NATIVE_PE: lockdown zone ready\n");
+ 	StartIOKitMatching();
++	printf("NATIVE_PE: matching returned\n");
+ }
+ 
+ void
