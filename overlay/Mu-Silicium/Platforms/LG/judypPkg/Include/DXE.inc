@@ -63,7 +63,13 @@
 !endif
 
   INF Binaries/judyp/QcomPkg/Drivers/PlatformInfoDxe/PlatformInfoDxe.inf
-  INF Binaries/judyp/QcomPkg/Drivers/ButtonsDxe/ButtonsDxe.inf
+  # ButtonsDxe is the prebuilt LG binary, and on judyp it spins: every poll calls get_hw_version,
+  # smem_alloc(smem_type=136) fails on this device's SMEM table, and the failure path allocates a
+  # page each time. The console fills with `smem_alloc: SMEM allocation failed!` and the pool runs
+  # dry (TzDxe/FzDxe then assert in UncachedMemoryAllocationLib.c), which also starves the timer
+  # events the menu countdown and the volume keys ride on. Without it there is no console input
+  # device, so the menu falls back to its timeout and boots the default entry by itself.
+  # INF Binaries/judyp/QcomPkg/Drivers/ButtonsDxe/ButtonsDxe.inf
   INF Binaries/judyp/QcomPkg/Drivers/PmicDxe/PmicDxeLa.inf
   INF Binaries/judyp/QcomPkg/Drivers/ChargerExDxe/ChargerExDxe.inf
   INF Binaries/judyp/QcomPkg/Drivers/QcomChargerDxe/QcomChargerDxeLA.inf
