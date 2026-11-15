@@ -23,7 +23,12 @@
   BUILD_TARGETS                  = RELEASE|DEBUG
   SKUID_IDENTIFIER               = DEFAULT
   FLASH_DEFINITION               = judypPkg/judyp.fdf
-  USE_CUSTOM_DISPLAY_DRIVER      = 1
+  # SimpleFbDxe only: it draws into the cont_splash framebuffer the ABL leaves running, which is the
+  # one display path that has ever produced the menu (E40). The LG vendor stack behind
+  # USE_CUSTOM_DISPLAY_DRIVER=1 (DisplayDxe/DisplayReEnablerDxe/CPRDxe) ran the DXE heap out of
+  # memory on the first firmware-built run -- FzDxe ASSERTed in UncachedMemoryAllocationLib.c(389)
+  # with EFI_OUT_OF_RESOURCES -- so it stays off until the memory story is understood.
+  USE_CUSTOM_DISPLAY_DRIVER      = 0
 
 !include NapaliPkg/NapaliPkg.dsc.inc
 
