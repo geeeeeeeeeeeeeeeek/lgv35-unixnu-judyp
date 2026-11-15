@@ -68,7 +68,10 @@ static const OSMetaClass *lookup(const char *text)
 extern "C" void sheng_pmgr_run(void)
 {
   unsigned mode = 0;
-  if (!PE_parse_boot_argn("sheng-pmgr", &mode, sizeof(mode)) || !mode) return;
+  // pmgr=2 is the name the payload guard in scripts/unixnu/payload.py looks for before it writes the
+  // volume: it refuses a native UFS root boot without exactly one pmgr=2 because the unchanged target
+  // AMFI otherwise panics with "No PMGR" on hardware that has no PMGR to wait for.
+  if (!PE_parse_boot_argn("pmgr", &mode, sizeof(mode)) || !mode) return;
   sheng_pmgr_observation[15] = mode;
   sheng_pmgr_observation[1] = static_cast<uint32_t>(kIOReturnError);
   if (mode > 3 || sheng_pmgr_observation[0]) { sheng_pmgr_checkpoint(); return; }
