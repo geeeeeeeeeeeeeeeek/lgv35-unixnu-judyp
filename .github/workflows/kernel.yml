@@ -277,9 +277,13 @@ jobs:
           test -f "$seed"
           test -f "${seed%.macho}.json"
           echo "seed prelink: $seed ($(wc -c < "$seed") bytes)"
-          # The real build audits the seed; ENCHILADA_STORAGE_AUDIT stays unset so the storage archive
-          # re-audits the seed image instead of comparing it with the kernelcache audit above.
+          # The real build takes the seed as ENCHILADA_STORAGE_CANDIDATE: the archives after the storage
+          # one (PMGR, touch, ...) read its prelink report. The storage ABI audit cannot qualify a prelink
+          # that [kernel.prelink] slide rebased, so it keeps the pinned-kernelcache audit made above and
+          # only cross-checks that report against the kernelcache.
           echo "ENCHILADA_STORAGE_CANDIDATE=$seed" >> "$GITHUB_ENV"
+          echo "ENCHILADA_STORAGE_AUDIT=$GITHUB_WORKSPACE/device/build/storage-abi/interface-audit.json" >> "$GITHUB_ENV"
+          echo "ENCHILADA_STORAGE_AUDIT_CANDIDATE=$GITHUB_WORKSPACE/$(ls out/ipsw/*/kernelcache.macho)" >> "$GITHUB_ENV"
           ./unixnu defconfig judyp_defconfig -D "$GITHUB_WORKSPACE/device"
 
       - name: Build kernel
