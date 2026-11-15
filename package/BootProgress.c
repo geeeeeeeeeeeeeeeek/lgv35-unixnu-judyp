@@ -275,6 +275,9 @@ volatile uint32_t bp_egic_regs[6];   // GICD_CTLR, GICR_TYPER affinity, GICR_WAK
 static uintptr_t bp_egic_gicd, bp_egic_redist;
 // Not declared by the headers this file pulls in; ArmCpu.cpp calls it the same way (timer ISR).
 extern void rtclock_intr(void *);
+// Defined below. Every step of the bring-up repaints, so if one of them faults the frame on screen
+// still says how far it got: this runs before there is any other console to report through.
+static void draw(unsigned now);
 
 static inline uint32_t egic_rd(uintptr_t base, unsigned offset) { return *(volatile uint32_t *)(base + offset); }
 static inline void egic_wr(uintptr_t base, unsigned offset, uint32_t value) {
@@ -303,16 +306,21 @@ static void bp_egic_irq(void *target, void *refcon, void *nub, int source) {
     __asm__ volatile("msr icc_eoir1_el1, %0\n\tisb" :: "r"(id) : "memory");
   }
 }
+static void egic_mark(unsigned step) {
+  bp_egic_state = step;
+  if (display.bound) draw(seconds());
+}
 static void boot_progress_early_gic(void) {
   uint64_t daif;
   if (bp_egic_state) return;
-  bp_egic_state = 1;
+  egic_mark(1);
   __asm__ volatile("mrs %0, daif" : "=r"(daif));
   __asm__ volatile("msr daifset, #2" ::: "memory");
   uintptr_t gicd = (uintptr_t)ml_io_map(GicdPa, GicdBytes);
   uintptr_t gicr = (uintptr_t)ml_io_map(GicrPa, GicrBytes);
   if (!gicd) { bp_egic_error = 1; goto done; }
   if (!gicr) { bp_egic_error = 2; goto done; }
+  egic_mark(2);
   if (((egic_rd(gicd, 0xffe8) >> 4) & 15) != 3) { bp_egic_error = 3; goto done; }
   bp_egic_gicd = gicd;
   uint32_t gicdCtl = egic_rd(gicd, 0);
@@ -325,7 +333,7 @@ static void boot_progress_early_gic(void) {
   egic_wr(gicd, 0, gicdCtl | 0x12U);   // ARE_NS stays, EnableGrp1NS on
   if (egic_wait_rwp(gicd) != 0) { bp_egic_error = 4; goto done; }
   bp_egic_regs[0] = egic_rd(gicd, 0);
-  // This core's redistributor frame, found by its affinity, exactly as wakeRedistributor does.
+  egic_mark(3);
   uint64_t mpidr;
   __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
   uint32_t want = (uint32_t)((mpidr & 0xffffffU) | ((mpidr >> 8) & 0xff000000U));
@@ -343,10 +351,12 @@ static void boot_progress_early_gic(void) {
   for (unsigned i = 0; i < 1000000; ++i) { if ((egic_rd(frame, 0x14) & 4U) == 0) { awakened = 1; break; } }
   bp_egic_regs[2] = egic_rd(frame, 0x14);
   if (!awakened) { bp_egic_error = 6; goto done; }
+  egic_mark(4);
   // Same install the CPU driver does for a secondary core: this core's cpu_data gets the handler.
   ml_install_interrupt_handler(0, 0, 0, bp_egic_irq, 0);
   egic_wr(frame + 0x10000, 0x100, 0xffffU | (1U << GicTimerIntid));   // SGIs 0-15 and the timer PPI
   bp_egic_regs[3] = egic_rd(frame + 0x10000, 0x100);
+  egic_mark(5);
   uint64_t sre;
   __asm__ volatile("mrs %0, icc_sre_el1" : "=r"(sre));
   sre |= 1;
@@ -365,6 +375,7 @@ static void boot_progress_early_gic(void) {
   __asm__ volatile("mrs %0, icc_igrpen1_el1" : "=r"(iccCtlr));
   bp_egic_regs[4] = (uint32_t)pmr;
   bp_egic_regs[5] = (uint32_t)iccCtlr;
+  egic_mark(6);
 done:
   __asm__ volatile("msr daif, %0" :: "r"(daif) : "memory");
 }
@@ -546,10 +557,11 @@ static void draw(unsigned now) {
       line(38,b,0xff00ff88);
       // The one row that says whether any IRQ can be delivered at all: the early bring-up's
       // readbacks (ctl = GICD_CTLR, ty = this core's GICR_TYPER affinity, wk = GICR_WAKER,
-      // isen = GICR_ISENABLER0, pmr/ig1 = ICC_PMR/ICC_IGRPEN1) and what the handler has seen.
-      snprintf(b,sizeof(b),"GIC ctl=%x ty=%x wk=%x isen=%x pmr=%x ig1=%x irq=%u oth=%u err=%u",
-        bp_egic_regs[0],bp_egic_regs[1],bp_egic_regs[2],bp_egic_regs[3],bp_egic_regs[4],bp_egic_regs[5],
-        bp_egic_irqs,bp_egic_other,bp_egic_error);
+      // isen = GICR_ISENABLER0, ig1 = ICC_IGRPEN1) plus how far the bring-up got (st) and what the
+      // handler has seen.
+      snprintf(b,sizeof(b),"GIC ctl=%x ty=%x wk=%x isen=%x ig1=%x irq=%u oth=%u err=%u st=%u",
+        bp_egic_regs[0],bp_egic_regs[1],bp_egic_regs[2],bp_egic_regs[3],bp_egic_regs[5],
+        bp_egic_irqs,bp_egic_other,bp_egic_error,bp_egic_state);
       line(30,b,0xff00ff88);
     }
     if(&native_cpufreq_stage && native_cpufreq_stage>=2)line(39,native_cpufreq_row,0xff00ccff);
@@ -747,9 +759,6 @@ void boot_progress_cancel_scanout(void) {
 }
 void boot_progress_init(void) {
   unsigned opt=0;
-  // Independent of boot-progress=: IOKit matching cannot finish without a timer tick, and this is
-  // the last pexpert hook before it starts (see boot_progress_early_gic).
-  boot_progress_early_gic();
   if (!PE_parse_boot_argn("boot-progress",&opt,sizeof(opt)) || (opt != 1 && opt != 2)) return;
   __asm__ volatile("mrs %0,cntfrq_el0" : "=r"(boot_progress_frequency));
   if (!boot_progress_frequency) return;
@@ -809,6 +818,10 @@ void boot_progress_stage(const char *text) {
   // timeslice, and a screen that never repaints would hide the stage that was just recorded.
   if ((!started || !thread_count) && !state.frozen) draw(now);
   release();
+  // The GIC is opened on the first stage reported after the framebuffer is bound: that frame is
+  // already on screen, so a fault here still leaves the panel (with st=) visible. It has to happen
+  // before IOKit matching starts (see boot_progress_early_gic).
+  if (!bp_egic_state && display.bound) boot_progress_early_gic();
 }
 void boot_progress_process_stage(int pid,const char *name,const char *text) {
   if(!enabled || !take())return;
