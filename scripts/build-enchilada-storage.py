@@ -45,19 +45,27 @@ def main():
         raise SystemExit(f'{candidate} has no prelink report beside it; supply ENCHILADA_STORAGE_AUDIT for it')
     prelink = ROOT / 'build/native-prelink'
     prelink.mkdir(parents=True, exist_ok=True)
-    for suffix in ('.macho', '.json'):
-        source = Path(candidate).with_suffix(suffix)
-        if source.is_file():
-            shutil.copyfile(source, prelink / f'native-owner-ufs-rootauth3-candidate{suffix}')
+    # Two staging names for the same pair: this board's scripts read build/native-prelink, the upstream kit
+    # audits (audit-amfi-pmgr-contract.py) read build/xnu-prelink.
+    for directory in (prelink, ROOT / 'build/xnu-prelink'):
+        directory.mkdir(parents=True, exist_ok=True)
+        for suffix in ('.macho', '.json'):
+            source = Path(candidate).with_suffix(suffix)
+            if source.is_file():
+                shutil.copyfile(source, directory / f'native-owner-ufs-rootauth3-candidate{suffix}')
     original = ROOT.parents[1] / 'ipsw/21H461/kernelcache.decompressed'
     if original.is_file():
         staged = ROOT / '.cache/firmware/kernelcache.macho/kernelcache.release.ipad7.decompressed'
         staged.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(original, staged)
     if audit:
+        # The report may belong to the pinned kernelcache (the only image this script can qualify once
+        # [kernel.prelink] slide rebases the modules) while the candidate stays this board's own prelink,
+        # which the archives after this one read the prelink report of.
+        audited = Path(os.environ.get('ENCHILADA_STORAGE_AUDIT_CANDIDATE', candidate))
         recorded = json.loads(Path(audit).read_text())['candidate_sha256']
-        if recorded != hashlib.sha256(Path(candidate).read_bytes()).hexdigest():
-            raise SystemExit(f'{audit} was made for candidate {recorded}, not {candidate}')
+        if recorded != hashlib.sha256(audited.read_bytes()).hexdigest():
+            raise SystemExit(f'{audit} was made for candidate {recorded}, not {audited}')
         (ROOT / 'build/storage-abi').mkdir(parents=True, exist_ok=True)
         shutil.copyfile(audit, ROOT / 'build/storage-abi/interface-audit.json')
         print(f'storage audit: {audit} (candidate {recorded[:16]})', flush=True)
