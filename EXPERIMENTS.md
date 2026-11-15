@@ -338,6 +338,9 @@
 - **`gSiliciumEntryArgHobGuid`**：`JudypBootMemoryDxe.inf` 的 `[Guids]` 引用了它，但上游 `SiliciumPkg.dec` 没有声明（enchilada 是靠 `make-enchilada-uefi.py` 打 SEC 补丁时才加进去的），于是 EDK II 直接 `build.py error 4000`。现在 `make-judyp-uefi.py` 只补这一行声明，**不打** SEC entry-arg 补丁：那是历史上把这个系列打进黑屏的改动（见上游文档 line 82）。代价是这个 DXE 运行时找不到 HOB、不发布 ramdisk 卷，payload 只能从真实分区（`payload.img` → `system_a`）加载，不能走 boot.img 里的 ramdisk。
 - **进度**：run 43679358255（`d1628815`）已经跑完种子 → 内核 → DarwinBoot → platform seed → Data seed 校验 → payload → staging，只在最后 `Build UniXNU package and firmware volume` 因那个 GUID 失败。修好后 run 43681159374（`cba0eb5b`）**没有启动**：`The job was not started because recent account payments have failed or your spending limit needs to be increased`——私有仓库的 macOS runner 按 10 倍折算，今天的 2000 分钟额度用完了。
 - **下一步（二选一）**：给账号加付款/提高 spending limit；或把仓库改成公开（公开仓库的 standard runner 不计量，macOS 也一样）。额度恢复后一条命令就能出全套产物：`dispatch-kernel-seeded.sh 43677790897`。
+- **改成公开后一次跑通到第 26 步**：run 43683477666（`b2c13efd`）步骤 1–22 全 success，`Pack the boot images`、`Upload kernel`、`Upload payload` 都拿到了产物，只剩最后一个上传失败。
+- **`boot.img` 的 shim 头**：`BootShim.S` 里 Image Size 写的是 `.quad FD_SIZE`，而 `bootimg.py` 会校验 offset 8 那句必须是「shim 长度 + 固件卷大小」，否则 `the ARM64 image header does not describe the shim plus the firmware volume`。`make-judyp-uefi.py` 幂等地把它替换成 `.quad FD_SIZE + (_Payload - _Head)`。
+- **`upload-artifact` 不接受 `..`**：`Upload boot image and firmware volume` 直接写 `../Mu-Silicium/Build/judypPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd` 会报 `Invalid pattern ... Relative pathing '.' and '..' is not allowed`（工作区外的路径一律拒绝，哪怕存在）。现在 `Pack the boot images` 末尾先把它 `cp` 到 `out/judyp/boot/SILICIUM_UEFI.fd` 再上传。
 
 
 
