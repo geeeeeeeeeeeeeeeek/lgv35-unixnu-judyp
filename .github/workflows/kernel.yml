@@ -209,6 +209,10 @@ jobs:
       - name: Build a seed kernel for the prelink audits
         env:
           UNIXNU_UEFI: ${{ github.workspace }}/../Mu-Silicium
+          # prepare-xnu-source.py runs inside the bootstrap pass and calls the GitHub API for the
+          # DriverKit headers. Anonymous calls share a small per-address quota that hosted runners
+          # exhaust, so the seed fails with "HTTP Error 403: rate limit exceeded" without a token.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -eu
           cp device/board.toml /tmp/board.toml.device
