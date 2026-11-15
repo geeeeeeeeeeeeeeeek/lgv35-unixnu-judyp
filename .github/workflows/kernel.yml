@@ -32,7 +32,11 @@ on:
       mu_silicium_ref:
         description: Mu-Silicium ref (empty = its default branch)
         required: false
-        default: ""
+        # fb4efb37 is the tree E39/E40's firmware was built from. Its decompressed FVMAIN is
+        # 6,606,856 bytes; main had grown to 8,986,632 by the time the CI started building from it,
+        # and that firmware dies in DXE with `Out of Resources` (TzDxe/FzDxe assert in
+        # UncachedMemoryAllocationLib.c) before any of our drivers run. Pin first, bisect later.
+        default: "fb4efb37b4ac289ce83ad94c7acb73defb87955c"
       unique_chip_id:
         description: >-
           Platform seed for the Apple device tree, 16 hex digits. Leave empty to use the
@@ -138,8 +142,12 @@ jobs:
       # still the full size.
       - name: Check out Mu-Silicium and apply the judyp overlay
         run: |
-          git clone --recurse-submodules --shallow-submodules --depth 1 \
-            ${MU_REF:+--branch "$MU_REF"} https://github.com/Project-Silicium/Mu-Silicium ../Mu-Silicium
+          # A pin may be a commit, and --branch only accepts branches and tags, so fetch explicitly.
+          git init -q ../Mu-Silicium
+          git -C ../Mu-Silicium remote add origin https://github.com/Project-Silicium/Mu-Silicium
+          git -C ../Mu-Silicium fetch --depth 1 origin "${MU_REF:-HEAD}"
+          git -C ../Mu-Silicium checkout -q FETCH_HEAD
+          git -C ../Mu-Silicium submodule update --init --recursive --depth 1
           cp -r device/overlay/Mu-Silicium/Platforms \
                 device/overlay/Mu-Silicium/Resources \
                 device/overlay/Mu-Silicium/Silicium-ACPI ../Mu-Silicium/
