@@ -284,7 +284,10 @@ static void bar(unsigned row, const char *text, uint32_t color, uint32_t backgro
   bp_line_bg(&display,row,text,color,background);
 }
 static void draw(unsigned now) {
-  const struct bp_core *visible=started ? &render_snapshot : &state;
+  // render_snapshot is refreshed only by the monitor thread. If that thread has never run (no IRQ delivery, so no
+  // scheduling), the snapshot is still all zeroes and the page would show an empty history: draw the recorder's own
+  // state instead, so a photograph of the screen shows the last stage the boot thread actually reached.
+  const struct bp_core *visible=started && thread_count ? &render_snapshot : &state;
   char b[BP_COLS];
   uint64_t tcr, ttbr0, ttbr1, sctlr;
   __asm__ volatile("mrs %0,tcr_el1" : "=r"(tcr));
@@ -302,6 +305,7 @@ static void draw(unsigned now) {
           "UniXNU boot diagnostics - live XNU - native 4K - no automatic reboot";
   // Session/build label from the sheng-build-tag boot argument (e.g. ks-001, gpu-003), so a photograph says which image it is.
   if(build_tag[0]) snprintf(b,sizeof(b)," [%s] %s",build_tag,title); else snprintf(b,sizeof(b)," %s",title);
+  if(started && !thread_count) {size_t n=strlen(b);snprintf(b+n,sizeof(b)-n," | MONITOR NEVER RAN");}
   bar(0, b, 0xffffffff, visible->reason && !visible->continuous ? BP_BAR_STOP : BP_BAR_LIVE);
   snprintf(b,sizeof(b),"time=%us idle=%us IRQ=%llu monitor=%llu lost=%u root=%d procs=%d free=%u",
     now, now-visible->activity_at, irq_count, thread_count, visible->dropped,
@@ -518,9 +522,9 @@ static void draw(unsigned now) {
       b[n]=0;line(45+j,b,0xffaaaaaa);
     }
   }
-  snprintf(b,sizeof(b),"OBS pulse-worker=%u anchor=%u bind=%u result=%u depth=%u base=%llx (0=bound 1=invalid 2=UI owned)",
+  snprintf(b,sizeof(b),"OBS pulse-worker=%u anchor=%u bind=%u result=%u depth=%u base=%llx panel=%ux%u x%d (0=bound 1=invalid 2=UI owned)",
     __atomic_load_n(&pulse_worker_status,__ATOMIC_ACQUIRE),__atomic_load_n(&pulse.ready,__ATOMIC_ACQUIRE),
-    bind_count,bind_result,bind_depth,(uint64_t)bind_base);
+    bind_count,bind_result,bind_depth,(uint64_t)bind_base,display.width,display.height,display.scale);
   if(&native_touch_stage_req && native_touch_stage_req && &native_touch_rows) {
     // Touch replaces the TIMER/OBS rows (42-43) while it is requested: its summary row and the HID report counters.
     line(42,native_touch_rows[0],0xff00ffcc);
@@ -664,7 +668,7 @@ void boot_progress_putc(char c) {
   if (!enabled || !take()) return;
   bp_char(&state,c);
   unsigned now=seconds();
-  if (!started && !state.frozen && c=='\n' && now!=last_draw) draw(now);
+  if ((!started || !thread_count) && !state.frozen && c=='\n' && now!=last_draw) draw(now);
   release();
 }
 void boot_progress_stage(const char *text) {
@@ -677,7 +681,9 @@ void boot_progress_stage(const char *text) {
     text=stamped;
   }
   bp_stage(&state,text,now);
-  if (!started && !state.frozen) draw(now);
+  // Before the monitor thread has run even once, paint from the caller: with no IRQ delivery that thread never gets a
+  // timeslice, and a screen that never repaints would hide the stage that was just recorded.
+  if ((!started || !thread_count) && !state.frozen) draw(now);
   release();
 }
 void boot_progress_process_stage(int pid,const char *name,const char *text) {
