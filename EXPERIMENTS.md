@@ -346,6 +346,113 @@
 - **增量构建**：runner 是干净虚拟机，没有 Docker 层；等价物是 `actions/cache`。已加两层（`e621fe06`）：`out/ipsw`（key = `board.toml` 哈希）和 `out-seed`（key = `configs/kits/package/patches/overlay/scripts` 哈希 + refs + Xcode）。命中时跳过种子构建（约 5 分钟）；XNU 编译本身跨机器没有增量支持，暂不缓存对象目录。
 - **下载产物的网络**：WSL 直连 GitHub artifact 存储只有 ~40 KB/s（8 MiB 要 206 s），走 Windows 侧代理 `http://172.20.128.1:111` 是 ~1.2 MB/s（同一 8 MiB 只要 6.8 s），30 倍差距。`dl-resume.sh` 现在支持 `PROXY=` 环境变量 + `curl -C -` 断点续传。
 
+### 11-15 19:10 先开 GIC，再进 IOKit（`1b08564` / `113f52b` / `88a8f91`）
+
+- 动机：面板 `GIC ctl=0 ty=0 isen=0 ...` 说明 IOKit 之前 GIC 从未被编程，任何中断都收不到，怀疑匹配路径被"没有中断"卡住。
+- 改动：`pexpert/arm/pe_init.c` 在 IOKit 匹配之前按 GICv3 手工编程（GICD_CTLR 打开 affine 路由、GICR_WAKER 醒来、优先级掩码），并前置声明 `rtclock_intr` 供早期中断处理指向。
+- 结果：面板 `GIC ctl=12 ty=0 wk=0 isen=800ff ig1=1 irq=0 oth=0 err=0 st=6` —— GIC 确实被打开了（ctl=12 = EnableGrp1NS|ARE_NS），但 `isen=800ff` 是默认全使能、`irq=0` 从未进过中断，停点不变。
+- 结论：不是"没开 GIC"导致的停；但这条改动保留，因为它把 `IRQ=1/mon=0` 的解释变干净了（平台真的一条中断都没收到）。
+
+### 11-15 21:03 给匹配路径加括号打点（`06bb698`）
+
+- 改动：在 `PE_lockdown_iokit`、`startIOServiceMatching`、`zalloc_ext`/`zone_expand_locked` 三处共 9 条 printf/IOLog，用 `native_wl_trace` 门控只在 workLoop 窗口打印。
+- 结果：**一条都没出现**。面板 console 最后一行仍是 `Serial requested, consistent debug disabled or debug boot arg not present, confi...`（`kdp_serial_init` 打的）。
+- 关键发现（本轮真正有价值的一条）：**printf/IOLog 在 `kdp_serial_init` 之后就不上屏了**，所以"没有输出"不等于"没有执行"。前几轮所有基于 printf 的判读全部无效。
+- 静态：`_PE_init_iokit+0x388`（旧内核 0xbf4d144）落在 `PE_init_iokit` 调用 `bl _InitIOKit` 之前的参数/串口处理段；`_PE_lockdown_iokit` 无独立符号（被内联在 `PE_init_iokit` 尾部），所以面板 history 里的 `PE_init_iokit` 不能说明"已经走到 lockdown"。
+
+### 11-15 21:38 kheap root nub + InitIOKit 逐步打点（`bf37dcf`，CI `5d5cb02`）
+
+- 改动：`OSObject_typed_operator_new` 从 `kalloc_type` 改走 `kheap_alloc`（假设类型区首次分配在 ticket spinlock 上自锁）；`InitIOKit` 每一步 `IOLog`；`startIOServiceMatching` 三个窗口标记。**注意：这条 kheap 改动没有上游依据，22:40 那轮已判定应撤。**
+- CI 提速：`kernel.yml` 加 `seed_warm` 输入 —— 命中 `restore-keys` 的 seed prelink 时跳过种子构建（省 13 分钟）。
+- 结果：run 43720093880 绿（21:39→21:58，19 分钟）；刷 `system_a` 后面板仍停 `PE_init_iokit`，`free=1188562`，无任何 IOLog。
+- 成本记录：`Build kernel` 599 s（上一轮约 360 s），`seed_warm` 只省掉 13 分钟种子，净收益约 2 分钟 —— 599 s 才是瓶颈。
+
+### 11-15 22:11 用面板 API 打面包屑（`df373d8`）
+
+- 改动：把 printf 打点换成面板自己的 `boot_progress_stage()`（`weak_import`），22 个 `BCnn` 检查点覆盖 `PE_init_iokit` 入口/`InitIOKit` 十步/`startIOServiceMatching`；`pe_init.c` 顶部先 printf 一条 `NATIVE_CTL` 作对照。
+- 结果：照片与 21:38 那轮**完全一致**（`free=1188562`、`wired=56516`、`t=6s`、同样的历史）—— 没有 `NATIVE_CTL`，也没有 `BC01`。
+- 由此产生两个互斥解释，屏上无法区分：(a) 新内核根本没有被加载；(b) `weak_import` 的调用被静默跳过（GOT 未绑定，`if (sym)` 直接过）。
+- 记一笔操作事故：本轮两次「秒进 BL」是我把 CI 的 `no-ramdisk/boot.img`（hv0、`ramdisk=0`、无 cmdline）刷进 `boot_a` 造成的 —— 正是 E11/E29b 已判死的变体。已刷回 `m4/boot-m4-nobtn.img`（stock 头 + 16,087,010 B stock ramdisk）恢复。**纪律：boot 分区只用 `m4/boot-m4-*.img`。**
+
+### 11-15 22:40 上游源码对照（`keyfan/UniXNU-enchilada-bringup`，仅静态）
+
+- 已 fetch 上游到本地 `upstream`（depth 1，522 文件），同 SoC 的 enchilada 端口 README 状态表写明**已到 SpringBoard** —— 即 sdm845 + 21H461 的 `PE_init_iokit`/IOKit 路径本身不卡。
+- 上游 `patches/xnu-device/` **没有**任何 `zalloc`/`OSObject`/`PE_init_iokit` 的改动 → 21:38 那轮的 kheap 改动无依据，应撤。
+- 上游的调试通道：
+  - `package/BootLog.c`：`sheng-log=1` 每 2 s 把面板文本 + 内核 msgbuf + panic 文本写 userdata 末尾 32 MiB（SHLOG001：块 0 头、1..32 msgbuf、33.. 文本环）。
+  - 读取：TWRP/adb 只读 `dd`（porting ROUND 49 原话 "recovered the full msgbuf window via TWRP dd"），或 `package/linux-log` 的 mainline 读取镜像 + USB CDC ACM（需要预编译 mainline boot + busybox + 模块，本地没有）。
+  - **但** `native_ufs_log_open` 要求 `gStoreGeometry.valid && gHost.ready`（根卷已挂），也就是 mountroot 之后才可能写 —— 我们卡在它之前，所以本次启动的 msgbuf 从没被写出去。pre-mountroot 阶段上游也只有面板可用。
+- 结论：提效不能靠"事后读日志"，只能靠「一轮回答多个确定问题」+ 缩短 CI。下一步必须先解决"内核身份不可判定"这件事（`vm_page_wire_count += 0x100` 这类不依赖日志通道的标记）。
+
+### 11-15 全天执行记录（CST，由 git + CI 重建）
+
+证据边界：当天 GitHub Actions 共 **44 次** run（05:51–22:12 CST；12 成功 / 29 失败 / 3 取消），`m4/` 当天新增 **49 个** boot 镜像，`out/` 新增 **8 个** payload 版本（ci2–ci8）。刷机次数无日志，下表按「可复查的产物 + run」归并，不虚构判读。
+
+| 阶段 | 时间（CST） | 规模 | 内容与结果 |
+|---|---|---|---|
+| 0 凌晨 boot 头 / UEFI 试验 | 00:00–04:32 | `m4/` 46 个镜像（E20–E43） | 已逐条记在本文 E20–E43：boot 头、shim、DTB 重编、display、按键、reset 时序 |
+| 1 CI 流水线磨合 | 05:51–08:54 | 20 次 run：18 失败 + 2 取消 | 全在 Actions 侧：seed/prelink、stub 符号、archive 路径；无设备结论 |
+| 2 首次全绿 | 11:27–12:45 | 6 次 run | 12:40 `43677790897` **首个 success**；其余为 keystore/pmgr/UEFI 符号修正 |
+| 3 产物链稳固 | 13:02–17:23 | 11 次 run：5 成功 / 1 取消 / 5 失败 | E46 全绿、shim 头尺寸、artifact 路径、IPSW+seed 缓存、Mu-Silicium 钉版、SimpleFbDxe 回退 |
+| 4 面板 + GIC | 18:29–19:56 | 4 次 run（3 成功 / 1 失败 `43707692406`） | 面板持续重绘、3x 字号、GICv3 前置打开、`rtclock_intr` 前置声明；照片显示 `GIC ctl=12` 但 `irq=0`，停点不变 |
+| 5 IOKit 打点三连 | 21:04–22:12 | 3 次 run，全成功 | `06bb698` 9 条 printf（全无输出）→ `bf37dcf` kheap+ IOLog（全无输出）→ `df373d8` 面板 BC 面包屑（无 BC、无 `NATIVE_CTL`） |
+
+各阶段 run id：
+- 阶段 1（全失败）：`43645031480` `43645042016`(取消) `43645409139` `43646946066` `43647595427` `43648115937` `43648639428` `43649595992` `43650943819` `43651947985` `43653018561` `43653496638` `43654047758` `43654967252` `43655871584` `43656896969` `43657831630`(取消) `43657916652` `43659597791` `43660528751`
+- 阶段 2：失败 `43672474238` `43673435004` `43674775117` `43676561471` `43678114878`；成功 `43677790897`
+  （注：`43676561471`/`43678114878` 位于 12:23/12:45，属阶段 2 尾）
+- 阶段 3：失败 `43679358255` `43681159374` `43681538165` `43683477666` `43685719694` `43697038856`；取消 `43694512868`；成功 `43686484135` `43690652485` `43695025337` `43699000521`
+- 阶段 4/5（`ci-scale`）：成功 `43704335330` `43709059425` `43711352036` `43717081985` `43720093880` `43723050355`；失败 `43707692406`
+
+产物清单（当天新建）：
+- `m4/`：46 个 `boot-e*.img`（E20–E43）+ `boot-m4-ci.img`(15:21) `boot-m4-simplefb.img`(16:15) `boot-m4-nobtn.img`(16:43)
+- `out/`：`ci2`(15:14) `ci3`(09:42 payload / 16:15) `ci4`(18:46) `ci5`(19:48、20:27) `ci6`(21:27) `ci7`(22:01) `ci8`(22:33)
+
+| 时间 | commit | CI | 做了什么 | 结果 |
+|---|---|---|---|---|
+| 05:37 | `9190d11` | — | judyp UniXNU 基线快照（UEFI 菜单 + 音量键） | 起点 |
+| 05:46–08:54 | `4ce43b7` `626412d` `54f6985` `bc1f982` `ea7fab8` `92a8c83` `734a764` `ae95368` `481888e` `298c4d1` `5e6f26f` `d157380` `79b8a93` `44acbd3` `9a9af52` `1641bf2` `a460891` `edd912e` `58fa871` | 阶段 1 | 内核构建搬上 Actions；kit 标签保留 enchilada；seed 从 pinned kernelcache 起步；去 PMGR 归档；真 patch series 当种子；stub 用 -fno-common 真定义 | 阶段 1 全失败，属 Actions 侧 |
+| 11:27–13:02 | `c209f3d` `0636761` `2550e66` `ecf1f03` `93ed800` `3ea4c84` `d162881` `cba0eb5` | 阶段 2 | 种子 stub 去前导下划线；storage 审计；keystore `native_aks_device_id`；`pmgr=2`；UEFI `gSiliciumEntryArgHobGuid` | 12:40 首次全绿 |
+| 13:27–17:23 | `be42a28` `b2c13ef` `7b61172` `b1fe61e` `9ee420b` `9e52f8d` `e621fe0` `5dcdf4f` `30840f7` `da5aa83` `b45acd5` `07cfc66` `2b68826` `ddc45e9` | 阶段 3 | E46 记录；shim 头尺寸；artifact 路径；IPSW/seed 两级缓存；Mu-Silicium 钉 E40 树；去 ButtonsDxe；面板 2x | 产物链稳定，M4 可刷 |
+| 18:23–19:56 | `887184d` `1a4a3c0` `1b08564` `113f52b` `88a8f91` | 阶段 4 | 面板持续重绘 + 3x；GICv3 在 IOKit 前打开；`rtclock_intr` 前置声明 | `GIC ctl=12`、`irq=0`，停点不变 |
+| 21:03 | `06bb698` | 43717081985 | 匹配路径 9 条 printf 打点 | 一条未出 → printf 在 `kdp_serial_init` 后失效 |
+| 21:28–21:38 | `5d5cb02` `bf37dcf` | 43720093880 | `seed_warm` 开关；kheap root nub + `InitIOKit` IOLog | 面板逐字段不变，无输出 |
+| 22:11–22:30 | `df373d8` | 43723050355 | 面板 BC 面包屑（weak_import）+ `NATIVE_CTL` | 无 BC、无 `NATIVE_CTL` |
+| 22:12 之后 | — | — | 两次把 CI 的 `no-ramdisk/boot.img` 刷进 `boot_a` → 秒进 BL；刷回 `m4/boot-m4-nobtn.img` | 恢复面板（操作事故） |
+
+### 已确认事实（不得再测）
+
+1. `boot` 分区只能用 stock-like 变体（hv0 / `ramdisk=0` / 空 cmdline 会在 2.3 s 复位）—— E11/E29b。
+2. printf/IOLog 在 `kdp_serial_init` 之后不上屏；面板 console 最后一行永远是它的 `Serial requested...`。
+3. 面板 history 里的 `PE_init_iokit` 不能证明"已进 lockdown"（`PE_lockdown_iokit` 被内联，无独立符号）。
+4. 采样 PC 落在 `PE_init_iokit` 调 `bl _InitIOKit` 之前的参数/串口段。
+5. GIC 在 IOKit 之前从未被编程；即使手工打开（`ctl=12`）停点也不变。
+6. 停机形态：`free4K=1188562`（不缺内存）、`SMP req=0`（无副 CPU）、DAIF 屏蔽（IRQ-off 自锁）、无 panic。
+7. SHLOG 日志窗口必须 `gStoreGeometry.valid && gHost.ready`，即 mountroot 之后才能写 → pre-mountroot 无日志通道。
+8. 上游 enchilada（同 SoC）跑到 SpringBoard，且未改 `zalloc`/`OSObject`/`PE_init_iokit` → 停点是 judyp 侧差异。
+9. `seed_warm` 能省 13 分钟种子构建，但 `Build kernel` 599 s 才是瓶颈。
+10. 内核身份至今未证实：`df373d8` 的照片与 `bf37dcf` 逐字段相同，`weak_import` 未绑定可以完全解释"无输出"。
+
+### 流程规则（今天亏在这上面）
+
+- 每轮 dispatch **之前**先在本文写条目：时间、commit、要验证的命题、以及"这条命题尚未被上面 10 条覆盖"。
+- 每轮刷机后写：刷了哪个分区、镜像来源、面板判读、是否推翻已有结论。
+- 任何"没有输出"的判读，必须先证明观测通道可用，否则不计入结论。
 
 
 
+
+
+### 轮次 R-CK（vm_page_wire_count 计数打点）—— 11-15 23:4x，dispatch 前
+- commit：待填；patch：zzzzzzz-native-iokit-rootnub.patch（3 文件，88 行，apply-check OK @ pristine）
+- 新静态结论（本轮依据，源码可查）：
+  1. boot_progress_stage 是 payload 侧函数（package/BootProgress.c:807），内核引用被 CI stub archive 用空桩满足 → df373d8 的 BCxx 在链接期就是空操作，无输出是必然。
+  2. PE_init_iokit 第二句是 printf("iBoot version")，面板 console 从未出现 → 停点在第一句 PE_init_printf(TRUE) 内部（console/屏幕接管），IOKit 从未开始。前三轮打点全在停点之后。
+- 本轮命题（一次照片全部回答）：
+  P1 新内核是否在跑（wired 是否 +256）；
+  P2 停点是否在 PE_init_printf(TRUE) 内（N=0 即是）；
+  P3 若 N>0，逐 checkpoint 收窄。
+- 判读式：wired = 56516 + 256 + 4N；N=26 全过 → 停点在 matching 之后。
+- 判读表：N: 0 入口 / 1 PE_init_printf 后 / 2 首 printf 后 / 3 pe_prepare_images 后 / 4 InitIOKit 前 / 5-17 InitIOKit 内部(BC10..BC22) / 18 InitIOKit 后 / 19 ConfigureIOKit 后 / 20 lockdown 进 / 21 zalloc 后 / 22 SM 进 / 23 workLoop / 24 regService 进 / 25 regService 完 / 26 SM 完。
+- 回滚项：OSObject_typed_operator_new 的 kheap 改动已撤销（上游同 SoC 未动分配器，且停点在 IOKit 之前）。
+- CI：seed_warm=true。结果：待填。

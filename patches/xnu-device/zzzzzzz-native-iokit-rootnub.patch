@@ -1,52 +1,48 @@
-Report where IOKit stops through the boot-progress panel, not printf, and keep the root nub out of the type zones
-(judyp bring-up).
+Make the boot report progress through a channel that cannot die (judyp bring-up).
 
-Two rounds of printfs placed after PE_init_iokit printed nothing, and this round's photograph shows why that is
-not evidence about IOKit. The panel's "Kernel console" section still ends on
+Three instrumentation rounds in a row came back with a photograph identical field for field, and the
+reason is now known from the source, not from guessing:
 
-  Serial requested, consistent debug disabled or debug boot arg not present, confi...
+  1. printf/IOLog die at PE_init_printf(TRUE): PE_init_iokit's first statement points PE_putc at the
+     video console, and the panel console never shows a line printed after kdp_serial_init.
+  2. The df373d8 breadcrumbs called boot_progress_stage, which lives in the payload
+     (package/BootProgress.c:807), not in the kernel. The CI stub archive -- built for exactly the
+     probe symbols that boot progress imports -- satisfied the kernel's reference with an empty
+     no-op, so every call vanished at link time. BC00 could never have appeared.
 
-which osfmk/kdp/kdp_udp.c prints from kdp_serial_init during machine_startup -- that is, before PE_init_iokit runs.
-PE_init_iokit's first statement is PE_init_printf(TRUE), i.e. vcattach(), and from there the console belongs to the
-video console: vcattach() calls initialize_screen(NULL, kPEAcquireScreen) and replays msgbuf through vcputc().
-Nothing an IOKit printf or IOLog writes afterwards reaches the panel, so the six lines the previous round added to
-InitIOKit and the three in PE_lockdown_iokit could not have appeared even if the boot had passed them. What the same
-frame does say is unchanged: the stage row names PE_init_iokit (startup recording) and 1188562 pages are free, so the
-boot stops inside PE_init_iokit, with the interrupt mask set and no panic.
+Static reading also narrows the stall: PE_init_iokit's second statement is printf("iBoot version"),
+and that line has never appeared on the panel console, which stays alive up to the kdp stage. So the
+kernel stops inside PE_init_printf(TRUE) -- the console/screen takeover -- before InitIOKit and
+before anything IOKit-related. The three earlier rounds instrumented code that never executed.
 
-So the instrumentation moves to the one channel that does not go through printf: package/BootProgress.c's
-boot_progress_stage(), which records the text as a stage and then paints the framebuffer from the caller while the
-monitor thread has not run (started && !thread_count). That paint happens synchronously at the breadcrumb, so it
-survives the IRQ-off hard lock the panel's own heading warns about, and the page already renders the last six stages:
-one photograph names the last step reached.
+This patch therefore instruments through the one channel that cannot die: the panel's MEM row prints
+vm_page_wire_count, read live from kernel memory by the payload itself. Entry to PE_init_iokit adds
+256 pages (identity: 56516 -> 56772, far outside natural build-to-build spread), and each checkpoint
+passed adds 4, so the photograph reads wired = 56516 + 256 + 4*N and N names the last completed
+step (table in pexpert/arm/pe_init.c):
 
-Three changes:
+  0 entered PE_init_iokit   1 PE_init_printf returned   2 first printf completed
+  3 pe_prepare_images       4 before InitIOKit          5-17 InitIOKit internals
+ 18 InitIOKit returned     19 ConfigureIOKit returned   20 lockdown entered
+ 21 zalloc_iokit_lockdown  22-25 matching/workLoop/registerService   26 StartIOKitMatching returned
 
-  1. BC01..BC22 walk PE_init_iokit -> InitIOKit -> ConfigureIOKit and BC30..BC33 walk startIOServiceMatching, one
-     per step, so a stop is a step name instead of a function name; BC40..BC42 keep bracketing PE_lockdown_iokit.
-
-  2. "NATIVE_CTL: PE_init_iokit entered" is printed immediately before PE_init_printf(TRUE). It is the only printf
-     added, and it is the control that separates "the console dies at that statement" from "the boot never got
-     there" without another round.
-
-  3. OSObject_typed_operator_new still takes every OSObject from kheap_alloc instead of a kalloc_type zone
-     (unchanged, still the one behavioural change). If the boot now reaches BC17 the type-zone allocation inside
-     "new IOPlatformExpertDevice" is not the fault; if it stops between BC16 and BC17, it is.
-
-The previous round's zalloc trace is dropped: it printed through the same dead console.
+If wired stays 56516 while the stage row still shows PE_init_iokit, the payload on the device is the
+old kernel and the problem is the flash chain, not the code. The kheap_alloc change to
+OSObject_typed_operator_new from the previous round is gone: upstream runs this XNU on the same SoC
+without touching the allocator, and the stall is now known to be before InitIOKit anyway.
 
 diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
-index d0149a6..dfedeb0 100644
+index d0149a6..372aaf9 100644
 --- a/iokit/Kernel/IOPlatformExpert.cpp
 +++ b/iokit/Kernel/IOPlatformExpert.cpp
 @@ -2086,15 +2086,24 @@ IOPlatformExpertDevice::init(void *dtRoot)
  	return true;
  }
  
-+/* UNI_BC: see the comment in iokit/Kernel/IOStartIOKit.cpp -- the boot-progress panel paints from
-+ * the caller, printf/IOLog no longer reach the screen after PE_init_printf(TRUE). */
-+extern "C" void boot_progress_stage(const char *text) __attribute__((weak_import));
-+#define UNI_BC(text) do { if (boot_progress_stage) boot_progress_stage(text); } while (0)
++/* UNI_CK: see the comment in iokit/Kernel/IOStartIOKit.cpp -- every site bumps vm_page_wire_count
++ * by 4; BC30..BC33 are N=22..25 in the execution-order table in pexpert/arm/pe_init.c. */
++extern "C" unsigned int vm_page_wire_count;
++#define UNI_BC(text) do { vm_page_wire_count += 4; } while (0)
 +
  bool
  IOPlatformExpertDevice::startIOServiceMatching(void)
@@ -65,26 +61,27 @@ index d0149a6..dfedeb0 100644
  	return true;
  }
 diff --git a/iokit/Kernel/IOStartIOKit.cpp b/iokit/Kernel/IOStartIOKit.cpp
-index d74c063..a11c591 100644
+index d74c063..a84209d 100644
 --- a/iokit/Kernel/IOStartIOKit.cpp
 +++ b/iokit/Kernel/IOStartIOKit.cpp
-@@ -130,6 +130,15 @@ iokit_post_constructor_init(void)
+@@ -130,6 +130,16 @@ iokit_post_constructor_init(void)
   */
  void (*record_startup_extensions_function)(void) = NULL;
  
 +/*
-+ * UNI_BC: package/BootProgress.c records the text as a stage and paints the framebuffer from the
-+ * caller while the monitor thread has not run, so the last breadcrumb survives a hard lock. IOLog is
-+ * not usable here: PE_init_iokit has already called PE_init_printf(TRUE), which points PE_putc at
-+ * the video console, and everything printed afterwards is dropped.
++ * UNI_CK: progress is signalled through vm_page_wire_count, which the boot-progress panel prints
++ * live in its MEM row by reading kernel memory itself (see the full comment in pexpert/arm/pe_init.c).
++ * Every UNI_BC site bumps the counter by 4; the panel's reading is wired = 56516 + 256 + 4*N and N
++ * names the last checkpoint completed. Site order in execution: BC10..BC22 are N=5..17 here; the
++ * table for every site lives in the pe_init.c comment block.
 + */
-+extern "C" void boot_progress_stage(const char *text) __attribute__((weak_import));
-+#define UNI_BC(text) do { if (boot_progress_stage) boot_progress_stage(text); } while (0)
++extern "C" unsigned int vm_page_wire_count;
++#define UNI_BC(text) do { vm_page_wire_count += 4; } while (0)
 +
  void
  InitIOKit(void *dtTop)
  {
-@@ -143,31 +152,44 @@ InitIOKit(void *dtTop)
+@@ -143,31 +153,44 @@ InitIOKit(void *dtTop)
  	// of iokit basic service initialisation, or better we have IOLib stuff
  	// initialise as basic OS services.
  	//
@@ -129,95 +126,109 @@ index d74c063..a11c591 100644
  }
  
  void
-diff --git a/libkern/c++/OSObject.cpp b/libkern/c++/OSObject.cpp
-index cd00373..6611c9a 100644
---- a/libkern/c++/OSObject.cpp
-+++ b/libkern/c++/OSObject.cpp
-@@ -324,19 +324,17 @@ OSObject_typed_operator_new(kalloc_type_view_t ktv, vm_size_t size)
- 	 * using the parent's operator new/delete. If we detect such
- 	 * a case we default to using kalloc rather than kalloc_type
- 	 */
--	void *mem = NULL;
--	if (size <= kalloc_type_get_size(ktv->kt_size)) {
--		/*
--		 * OSObject_typed_operator_new can be called from kexts,
--		 * use the external symbol for kalloc_type_impl as
--		 * kalloc_type_views generated at some external callsites
--		 * many not have been processed during boot.
--		 */
--		mem = kalloc_type_impl_external(ktv, Z_WAITOK_ZERO);
--	} else {
--		mem = kheap_alloc(KHEAP_DEFAULT, size,
--		    Z_VM_TAG_BT(Z_WAITOK_ZERO, VM_KERN_MEMORY_LIBKERN));
--	}
-+	/*
-+	 * NATIVE_NEW: on judyp the boot stops in the first kalloc_type allocation -- InitIOKit ->
-+	 * new IOPlatformExpertDevice -> OSObject_typed_operator_new -> kalloc_type_impl_external ->
-+	 * zalloc_ext -> zone_expand_locked, with interrupts masked and no panic. To tell "the type
-+	 * zone is the problem" apart from "any allocation under this call is the problem", every
-+	 * OSObject is taken from kheap_alloc here, which is the path operator delete already frees
-+	 * to, and which the plain OSObject::operator new above has always used.
-+	 */
-+	(void)ktv;
-+	void *mem = kheap_alloc(KHEAP_DEFAULT, size,
-+	    Z_VM_TAG_BT(Z_WAITOK_ZERO, VM_KERN_MEMORY_LIBKERN));
- 	assert(mem);
- 	OSIVAR_ACCUMSIZE(size);
- 
 diff --git a/pexpert/arm/pe_init.c b/pexpert/arm/pe_init.c
-index 433b6cd..af1d02d 100644
+index 433b6cd..c66b1c9 100644
 --- a/pexpert/arm/pe_init.c
 +++ b/pexpert/arm/pe_init.c
-@@ -44,6 +44,17 @@ char iBoot_version[FW_VERS_LEN];
+@@ -44,6 +44,39 @@ char iBoot_version[FW_VERS_LEN];
  char iBoot_Stage_2_version[FW_VERS_LEN];
  #endif /* defined(TARGET_OS_OSX) && defined(__arm64__) */
  
 +/*
-+ * UNI_BC: breadcrumbs go through the boot-progress panel (package/BootProgress.c), which records the
-+ * text as a stage and then *paints the framebuffer from the caller* while the monitor thread has not
-+ * run yet -- so the last breadcrumb stays readable even if the CPU hard-locks with interrupts masked.
-+ * printf cannot be used here: PE_init_iokit's first statement is PE_init_printf(TRUE), which points
-+ * PE_putc at the video console, and every printf after that point is dropped (that is why the panel's
-+ * "Kernel console" section ends at the kdp_serial_init line of machine_startup).
++ * UNI_CK: progress is signalled through vm_page_wire_count, which the boot-progress panel prints
++ * live in its MEM row by reading kernel memory itself. The counter is bumped at fixed checkpoints:
++ * +256 on entry to PE_init_iokit (identity: proves this kernel is the one running, since the value
++ * is far outside the natural spread) and +4 per checkpoint passed. The panel's reading is
++ * wired = 56516 + 256 + 4*N, and N names the last checkpoint completed. No printf, no IOLog and no
++ * call into the payload is involved: every previous output channel (printf after kdp_serial_init,
++ * IOLog, and kernel-side calls to the payload's boot_progress_stage, which the CI stub archive
++ * satisfied with an empty no-op) was proven or suspected dead, while this one only needs the panel
++ * to keep reading kernel memory, which it demonstrably does.
++ *
++ * Execution-order checkpoint table (N = (wired - 56772) / 4):
++ *   0 PE_init_iokit entered (+256, identity)
++ *   1 PE_init_printf(TRUE) returned
++ *   2 first post-switch printf ("iBoot version") completed
++ *   3 pe_prepare_images returned
++ *   4 before InitIOKit
++ *   5-17 InitIOKit internals (IOStartIOKit.cpp): BC10 body, BC11 IOLibInit, BC12 OSlibkernInit,
++ *       BC13 IOMachPortInitialize, BC14 symbols, BC15 interruptAccountingInit, BC16 before new,
++ *       BC17 allocated, BC18 before init, BC19 inited, BC20 attached, BC21 record_startup_extensions,
++ *       BC22 tail
++ *  18 InitIOKit returned
++ *  19 ConfigureIOKit returned
++ *  20 PE_lockdown_iokit entered
++ *  21 zalloc_iokit_lockdown returned
++ *  22 startIOServiceMatching entered
++ *  23 workLoop allocated
++ *  24 registerService entered
++ *  25 registerService done
++ *  26 StartIOKitMatching returned
 + */
-+extern void boot_progress_stage(const char *text) __attribute__((weak_import));
-+#define UNI_BC(text) do { if (boot_progress_stage) boot_progress_stage(text); } while (0)
++extern unsigned int vm_page_wire_count;
 +
  /*
   * This variable is only modified once, when the BSP starts executing. We put it in __DATA_CONST
   * as page protections on kernel text early in startup are read-write. The kernel is
-@@ -255,6 +266,10 @@ PE_init_iokit(void)
+@@ -255,13 +288,21 @@ PE_init_iokit(void)
  	uint32_t        load_kernel_start_value = 0;
  	uint32_t        populate_registry_time_value = 0;
  
-+	/* UNI_BC: the last printf that can still reach the panel console, kept as a control: it proves
-+	 * the console dies at the next statement rather than the boot never getting here. */
-+	printf("NATIVE_CTL: PE_init_iokit entered\n");
-+	UNI_BC("BC01 PE_init_iokit enter");
++	/* UNI_CK #0: identity marker, +256. From here the panel's wired row reads 56516+256+4*N. */
++	vm_page_wire_count += 256;
  	PE_init_printf(TRUE);
  
++	/* UNI_CK #1: survived PE_init_printf(TRUE) -- the console/screen takeover returned. */
++	vm_page_wire_count += 4;
++
  	printf("iBoot version: %s\n", iBoot_version);
-@@ -371,8 +386,11 @@ PE_init_iokit(void)
+ #if defined(TARGET_OS_OSX) && defined(__arm64__)
+ 	printf("iBoot Stage 2 version: %s\n", iBoot_Stage_2_version);
+ #endif /* defined(TARGET_OS_OSX) && defined(__arm64__) */
+ 
++	/* UNI_CK #2: the first post-switch printf completed. */
++	vm_page_wire_count += 4;
++
+ 	if (kSuccess == SecureDTLookupEntry(0, "/chosen/memory-map", &entry)) {
+ 		boot_progress_element const *bootPict;
+ 
+@@ -281,6 +322,9 @@ PE_init_iokit(void)
+ 
+ 	pe_prepare_images();
+ 
++	/* UNI_CK #3: pe_prepare_images returned. */
++	vm_page_wire_count += 4;
++
+ 	scale = PE_state.video.v_scale;
+ 	flip = 1;
+ 
+@@ -371,8 +415,14 @@ PE_init_iokit(void)
  #endif
  	}
  
-+	UNI_BC("BC02 InitIOKit enter");
++	/* UNI_CK #4: about to call InitIOKit. */
++	vm_page_wire_count += 4;
  	InitIOKit(PE_state.deviceTreeHead);
-+	UNI_BC("BC03 InitIOKit returned");
++	/* UNI_CK #18: InitIOKit returned (internals are checkpointed inside it). */
++	vm_page_wire_count += 4;
  	ConfigureIOKit();
-+	UNI_BC("BC04 ConfigureIOKit returned");
++	/* UNI_CK #19: ConfigureIOKit returned. */
++	vm_page_wire_count += 4;
  }
  
  void
-@@ -390,8 +408,11 @@ PE_lockdown_iokit(void)
+@@ -390,8 +440,14 @@ PE_lockdown_iokit(void)
  	 * against a kernel which has not yet enabled the full set of available
  	 * hardware protections.
  	 */
-+	UNI_BC("BC40 PE_lockdown_iokit enter");
++	/* UNI_CK #24: PE_lockdown_iokit entered. */
++	vm_page_wire_count += 4;
  	zalloc_iokit_lockdown();
-+	UNI_BC("BC41 zalloc_iokit_lockdown returned");
++	/* UNI_CK #25: zalloc_iokit_lockdown returned. */
++	vm_page_wire_count += 4;
  	StartIOKitMatching();
-+	UNI_BC("BC42 StartIOKitMatching returned");
++	/* UNI_CK #26: StartIOKitMatching returned. */
++	vm_page_wire_count += 4;
  }
  
  void
