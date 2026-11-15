@@ -246,19 +246,21 @@ jobs:
           (root / 'board.toml').write_text('\n'.join(lines[:start + 1] + kept + lines[end:]) + '\n')
           print('seed archives:', len(kept))
           PY
-          # The probe symbols libBootProgress imports; data or function, the link does not care.
+          # The probe symbols libBootProgress imports. The identifiers carry NO leading underscore:
+          # Mach-O already prefixes every C symbol with one, so "_native_..." in C would define
+          # "__native_..." and the reference would stay unresolved.
           mkdir -p build/seed-stubs
           {
-            echo 'int _enchilada_adreno_poll(void) { return 0; }'
-            echo 'int _enchilada_gauge_poll(void) { return 0; }'
-            echo 'int _enchilada_smmu_poll(void) { return 0; }'
-            echo 'int _native_mobile_graphics_client_probe(void) { return 0; }'
-            echo 'int _sheng_pmgr_run(void) { return 0; }'
-            echo 'long _native_legacy_late_color_counts = 0;'
-            echo 'long _native_legacy_late_colors = 0;'
-            echo 'long _native_legacy_late_count = 0;'
-            echo 'long _native_legacy_late_stats = 0;'
-            echo 'long _native_legacy_late_time = 0;'
+            echo 'int enchilada_adreno_poll(void) { return 0; }'
+            echo 'int enchilada_gauge_poll(void) { return 0; }'
+            echo 'int enchilada_smmu_poll(void) { return 0; }'
+            echo 'int native_mobile_graphics_client_probe(void) { return 0; }'
+            echo 'int sheng_pmgr_run(void) { return 0; }'
+            echo 'long native_legacy_late_color_counts = 0;'
+            echo 'long native_legacy_late_colors = 0;'
+            echo 'long native_legacy_late_count = 0;'
+            echo 'long native_legacy_late_stats = 0;'
+            echo 'long native_legacy_late_time = 0;'
           } > build/seed-stubs/seed_stubs.c
           clang -target arm64-apple-ios17 -fno-common -c -o build/seed-stubs/seed_stubs.o build/seed-stubs/seed_stubs.c
           ar rcs build/seed-stubs/libSeedStubs.a build/seed-stubs/seed_stubs.o
