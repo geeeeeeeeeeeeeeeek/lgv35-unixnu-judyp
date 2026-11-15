@@ -444,7 +444,7 @@
 
 
 ### 轮次 R-CK（vm_page_wire_count 计数打点）—— 11-15 23:4x，dispatch 前
-- commit：待填；patch：zzzzzzz-native-iokit-rootnub.patch（3 文件，88 行，apply-check OK @ pristine）
+- commit：`b0bae2a`（run 43728585549，已刷 system_a）；patch：zzzzzzz-native-iokit-rootnub.patch（3 文件，88 行，apply-check OK @ pristine）
 - 新静态结论（本轮依据，源码可查）：
   1. boot_progress_stage 是 payload 侧函数（package/BootProgress.c:807），内核引用被 CI stub archive 用空桩满足 → df373d8 的 BCxx 在链接期就是空操作，无输出是必然。
   2. PE_init_iokit 第二句是 printf("iBoot version")，面板 console 从未出现 → 停点在第一句 PE_init_printf(TRUE) 内部（console/屏幕接管），IOKit 从未开始。前三轮打点全在停点之后。
@@ -455,4 +455,23 @@
 - 判读式：wired = 56516 + 256 + 4N；N=26 全过 → 停点在 matching 之后。
 - 判读表：N: 0 入口 / 1 PE_init_printf 后 / 2 首 printf 后 / 3 pe_prepare_images 后 / 4 InitIOKit 前 / 5-17 InitIOKit 内部(BC10..BC22) / 18 InitIOKit 后 / 19 ConfigureIOKit 后 / 20 lockdown 进 / 21 zalloc 后 / 22 SM 进 / 23 workLoop / 24 regService 进 / 25 regService 完 / 26 SM 完。
 - 回滚项：OSObject_typed_operator_new 的 kheap 改动已撤销（上游同 SoC 未动分配器，且停点在 IOKit 之前）。
+- CI：seed_warm=true。结果：**已刷机；面板 stage=PE_lockdown_iokit、采样 PC=`_memmove+0xc4`（8s）、DAIF=200、无 panic；wired 数值照片在旧窗口未回填，待重报后按 N=(wired-56772)/4 判读。**
+
+### 轮次 R-CK2（续接 27..33 检查点）—— 11-16，dispatch 前
+- commit：待填；patch：zzzzzzzz-startup-chain-checkpoints.patch（2 文件：osfmk/kern/startup.c + bsd/kern/bsd_init.c；patch --dry-run + git apply --check 双通过 @ pristine）
+- 设计：**不动 0..26 任何埋点**，只续接，故一轮照片同时回答 R-CK 的判读（N≤26 时两轮等价）和新链路。
+- 新链路埋点（N=56772/4+4N 同式）：
+  - 27 PE_lockdown_iokit 返回（= matching 全过）
+  - 28 kperf_init_early 返回
+  - 29 将进 bsd_init
+  - 30 bsd_init 入口
+  - 31 IOKitInitializeTime 返回
+  - 32 vfs_mountroot 成功
+  - 33 set_rootvnode 完成
+- 命题：
+  - P1 若新固件 wired=56772+4N 且 N≤26 → 与 R-CK 停点一致（0..26 未动），直接按旧表判读；
+  - P2 N=27 → IOKit matching 全过，停点在 startup.c 后链（首次把嫌疑从 IOKit 内部移出）；
+  - P3 N=28/29/30 → 卡点在 kperf/bsd_init 入口前/bsd_init 内部；
+  - P4 N≥31 需警惕自然 wired 增长污染（vfsinit/buffer cache/mountroot 会 wire 页）：判读看值是否精确落在 56772+4N 网格上；值大幅偏离网格 = 已过 IOKit、卡在 bsd 链内。
+- 与 ci9 采样的关联假设（待本轮证伪/证实）：PC=`_memmove+0xc4` 若对应 StartIOKitMatching 内部（IOService 匹配的 OSData/OSDictionary 拷贝），本轮应仍停在 N≤26；若对应 bsd 早期（如 bsd_bufferinit），应见 N≥30。
 - CI：seed_warm=true。结果：待填。

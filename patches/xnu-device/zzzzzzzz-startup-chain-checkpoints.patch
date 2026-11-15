@@ -1,0 +1,104 @@
+Extend the vm_page_wire_count checkpoint chain past PE_lockdown_iokit (judyp bring-up).
+
+The R-CK patch (zzzzzzzz-native-iokit-rootnub.patch -- one 'z' less) instrumented N=0..26 and
+left the chain blind exactly at the point where the panel's stage history ends
+(PE_lockdown_iokit) and where the sampled PC lives (_memmove+0xc4, sampled for 8 s).  This
+patch adds checkpoints 27..33 WITHOUT touching any 0..26 site, so a single photograph of the
+new kernel still answers the R-CK reading first (N=(wired-56772)/4, N<=26 means the old
+reading applies verbatim) and only then the new segment:
+
+ 27 PE_lockdown_iokit returned   28 kperf_init_early returned   29 about to enter bsd_init
+ 30 entered bsd_init             31 IOKitInitializeTime returned
+ 32 vfs_mountroot succeeded      33 root vnode set (set_rootvnode done)
+
+Caveat recorded in EXPERIMENTS.md: past IOKit matching, vm_page_wire_count also grows
+naturally (vfsinit, buffer cache, mountroot), so N>=31 readings can be polluted by natural
+wiring.  A value that is 56772+4*N with N in 27..33 and no other panel change is still a
+strong ordering signal; a wildly larger value means execution ran past IOKit and the stall
+is inside or after bsd_init.
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -880,9 +880,15 @@
+ 	kernel_bootstrap_log("kernel_do_post - done");
+ #endif /* CONFIG_XNUPOST */
+ 
++/* UNI_CK: see zzzzzzz-native-iokit-rootnub.patch -- every site bumps vm_page_wire_count
++ * by 4; sites 27..29 continue the table in pexpert/arm/pe_init.c past PE_lockdown_iokit. */
++extern unsigned int vm_page_wire_count;
++
+ #ifdef  IOKIT
+ 	kernel_bootstrap_log("PE_lockdown_iokit");
+ 	PE_lockdown_iokit();
++	/* UNI_CK #27: PE_lockdown_iokit returned. */
++	vm_page_wire_count += 4;
+ #endif
+ 	/*
+ 	 * max_cpus must be nailed down by the time PE_lockdown_iokit() finishes,
+@@ -893,12 +899,16 @@
+ 
+ #if KPERF
+ 	kperf_init_early();
++	/* UNI_CK #28: kperf_init_early returned. */
++	vm_page_wire_count += 4;
+ #endif
+ 
+ 	/*
+ 	 *	Start the user bootstrap.
+ 	 */
+ #ifdef  MACH_BSD
++	/* UNI_CK #29: about to enter bsd_init. */
++	vm_page_wire_count += 4;
+ 	bsd_init();
+ #endif
+ 
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -481,6 +481,8 @@
+  * of the tro_ucred field so that the uthread structure can be
+  * used like any other.
+  */
++extern unsigned int vm_page_wire_count;
++
+ void
+ bsd_init(void)
+ {
+@@ -506,6 +508,9 @@
+ #define bsd_init_kprintf(x, ...)
+ #endif
+ 
++	/* UNI_CK #30: entered bsd_init. */
++	vm_page_wire_count += 4;
++
+ 	throttle_init();
+ 
+ 	printf(copyright);
+@@ -697,6 +702,9 @@
+ 	bsd_init_kprintf("calling IOKitInitializeTime\n");
+ 	IOKitInitializeTime();
+ 
++	/* UNI_CK #31: IOKitInitializeTime returned (clock must be alive past here). */
++	vm_page_wire_count += 4;
++
+ 	/* Initialize the file systems. */
+ 	bsd_init_kprintf("calling vfsinit\n");
+ 	vfsinit();
+@@ -913,6 +921,9 @@
+ 		printf("cannot mount root, errno = %d\n", err);
+ 	}
+ 
++	/* UNI_CK #32: vfs_mountroot succeeded. */
++	vm_page_wire_count += 4;
++
+ 	IOSecureBSDRoot(rootdevice);
+ 
+ 	mountlist.tqh_first->mnt_flag |= MNT_ROOTFS;
+@@ -930,6 +941,9 @@
+ 	lck_rw_unlock_exclusive(&rootvnode_rw_lock);
+ 	init_rootvnode = NULLVP;  /* use rootvnode after this point */
+ 
++	/* UNI_CK #33: root vnode set. */
++	vm_page_wire_count += 4;
++
+ 
+ 	if (!bsd_rooted_ramdisk()) {
+ 		boolean_t require_rootauth = FALSE;
