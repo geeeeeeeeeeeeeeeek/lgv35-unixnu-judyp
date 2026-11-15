@@ -25,7 +25,9 @@ static void bp_line_bg(struct bp_display *d, unsigned row, const char *text, uin
   if (__atomic_load_n(&d->yield_requested,__ATOMIC_ACQUIRE)) return;
   if (!d->bound || row >= 48 || (row+1)*14*d->scale >= d->height) return;
   unsigned cols = d->width / (6*d->scale);
-  if (cols >= BP_COLS) cols = BP_COLS-1;
+  // A tinted row (the title bar and the section headings) fills the panel's full width; a text row stops at the last
+  // cell the buffer can hold, so at 3x the page is narrower than the screen and the bars still run edge to edge.
+  if (!background && cols >= BP_COLS) cols = BP_COLS-1;
   // Cache is only an output optimization. All framebuffer stores are bounded
   // by the supplied existing mapping's geometry, including padded rows.
   int recolor = d->colors[row][0] != color || d->colors[row][1] != background;

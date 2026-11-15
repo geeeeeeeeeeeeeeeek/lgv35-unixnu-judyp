@@ -299,32 +299,35 @@ static void draw(unsigned now) {
     visible->failures,last_pc,last_psr,last_sp,tcr,ttbr0,ttbr1,sctlr,
     visible->history_count,visible->log_lines,display.width,display.height,display.stride,display.frame};
   for(unsigned i=0;i<24;++i) boot_progress_observation[i]=observation[i];
-  const char *title = visible->continuous && visible->reason ? "LIVE: DEADLINE EXCEEDED - OS and diagnostic recording continue" :
-          visible->reason == 1 ? "STOP: NO STAGE / IO ACTIVITY FOR 30s - diagnostic snapshot" :
-          visible->reason == 2 ? "STOP: 120s OBSERVATION LIMIT - activity does not prove forward progress" :
-          "UniXNU boot diagnostics - live XNU - native 4K - no automatic reboot";
+  const char *title = visible->continuous && visible->reason ? "LIVE: deadline exceeded - OS continues" :
+          visible->reason == 1 ? "STOP: no stage/IO for 30s" :
+          visible->reason == 2 ? "STOP: 120s observation limit" :
+          "UniXNU boot diagnostics 3x";
   // Session/build label from the sheng-build-tag boot argument (e.g. ks-001, gpu-003), so a photograph says which image it is.
   if(build_tag[0]) snprintf(b,sizeof(b)," [%s] %s",build_tag,title); else snprintf(b,sizeof(b)," %s",title);
   if(started && !thread_count) {size_t n=strlen(b);snprintf(b+n,sizeof(b)-n," | MONITOR NEVER RAN");}
   bar(0, b, 0xffffffff, visible->reason && !visible->continuous ? BP_BAR_STOP : BP_BAR_LIVE);
-  snprintf(b,sizeof(b),"time=%us idle=%us IRQ=%llu monitor=%llu lost=%u root=%d procs=%d free=%u",
+  snprintf(b,sizeof(b),"t=%us idle=%us IRQ=%llu mon=%llu lost=%u root=%d procs=%d free=%u",
     now, now-visible->activity_at, irq_count, thread_count, visible->dropped,
     native_owner_root_accepted, nprocs, vm_page_free_count); line(1,b,0xffffffff);
-  snprintf(b,sizeof(b),"%s requests=%llu verified4K=%llu failures=%llu integrity=%u published=%u",
-    native_virtio_ready && !native_ufs_blocks_published ? "OFFLINE VIRTIO" : "UFS",
-    visible->reads,visible->verified,visible->failures,native_ufs_integrity_failures,native_ufs_blocks_published);
-  // Log rounds the writer skipped because launchd held the transport: a skipped round is not a failed one, and this
-  // counter is what distinguishes "the writer is alive but starved" from "the writer is dead".
-  if(&native_ufs_log_skips) {size_t n=strlen(b);snprintf(b+n,sizeof(b)-n," skips=%llu",native_ufs_log_skips);}
   if(&native_ufs_root_step && !native_ufs_blocks_published) {
-    // Nothing published yet: how far the root start got (probe calls, match, step, last soft-failure reason).
-    size_t n=strlen(b);const char *why=native_ufs_root_failure;
-    snprintf(b+n,sizeof(b)-n," | probe=%u match=%u root=%u %.40s",native_ufs_probe_calls,native_ufs_matched,
-      native_ufs_root_step,why?why:"-");
+    // Nothing published yet: how far the root start got. probe/match/root lead the row, because at 3x only the first
+    // 60 (1080-wide frame) or 80 (1440-wide frame) columns are on screen and the tail would never be photographed.
+    const char *why=native_ufs_root_failure;
+    snprintf(b,sizeof(b),"%s probe=%u match=%u root=%u read=%llu ok=%llu %.16s",
+      native_virtio_ready ? "VIRTIO" : "UFS",native_ufs_probe_calls,native_ufs_matched,native_ufs_root_step,
+      visible->reads,visible->verified,why?why:"-");
+  } else {
+    snprintf(b,sizeof(b),"%s requests=%llu verified4K=%llu failures=%llu integrity=%u published=%u",
+      native_virtio_ready && !native_ufs_blocks_published ? "OFFLINE VIRTIO" : "UFS",
+      visible->reads,visible->verified,visible->failures,native_ufs_integrity_failures,native_ufs_blocks_published);
+    // Log rounds the writer skipped because launchd held the transport: a skipped round is not a failed one, and this
+    // counter is what distinguishes "the writer is alive but starved" from "the writer is dead".
+    if(&native_ufs_log_skips) {size_t n=strlen(b);snprintf(b+n,sizeof(b)-n," skips=%llu",native_ufs_log_skips);}
   }
   line(2,b,0xffffffff);
   snprintf(b,sizeof(b),"TCR=%llx TTBR0=%llx TTBR1=%llx SCTLR=%llx",tcr,ttbr0,ttbr1,sctlr); line(3,b,0xffffffff);
-  snprintf(b,sizeof(b),"last IRQ PC=%llx PSR=%llx SP=%llx (sample, not a fault diagnosis)",last_pc,last_psr,last_sp); line(4,b,0xffffffff);
+  snprintf(b,sizeof(b),"last IRQ PC=%llx PSR=%llx SP=%llx",last_pc,last_psr,last_sp); line(4,b,0xffffffff);
   unsigned latest = visible->history_count ? (visible->history_count-1)%BP_HISTORY : 0;
   snprintf(b,sizeof(b),"stage: %.106s",visible->history[latest].text); line(5,b,0xff00ffff);
   if(!__atomic_exchange_n(&exit_lock,1,__ATOMIC_ACQUIRE)) {
@@ -416,8 +419,10 @@ static void draw(unsigned now) {
     // A comparator that is already in the past and was never re-armed is the signature of a handler that has not run
     // since expiry, so report the signed skew and how many timer periods it represents.
     long long skew=(long long)(cval-vct);
-    snprintf(b,sizeof(b),"TIMER vct=%llx cval=%llx skew=%lld us=%lld ctl=%llx DAIF=%llx PMR=%llx IGRPEN1=%llx (read-only monitor sample)",
-      vct,cval,skew,skew/19200,ctl,daif,pmr,igrp);
+    // Interrupt state leads the row: at 3x the last columns are off screen, and IGRPEN1 is the number that says
+    // whether any IRQ can be delivered at all.
+    snprintf(b,sizeof(b),"TIMER IGRPEN1=%llx PMR=%llx DAIF=%llx ctl=%llx skew=%lld vct=%llx cval=%llx",
+      igrp,pmr,daif,ctl,skew,vct,cval);
     if(!(&native_touch_stage_req && native_touch_stage_req))line(42,b,0xffaaaaaa);
     // wstep belongs on this short line, not on the UFS row: that row is longer than the screen and its tail (where
     // wstep used to sit) was never painted, so the one number that says where the writer is could not be read.
@@ -446,8 +451,9 @@ static void draw(unsigned now) {
       if(!count0)count0=counter;
       absolutetime_to_nanoseconds(counter-count0,&ns);
       uint64_t kms=ns/1000000,cms=boot_progress_frequency?(counter-count0)*1000/boot_progress_frequency:0;
-      snprintf(b,sizeof(b),"CLK cntfrq=%llu dt-timebase=%llu dt-converted=%llums cntfrq-converted=%llums (equal if the timebase is right)",
-        (unsigned long long)boot_progress_frequency,(unsigned long long)gPEClockFrequencyInfo.timebase_frequency_hz,kms,cms);
+      snprintf(b,sizeof(b),"CLK dt=%llums cntfrq=%llums %s frq=%llu tb=%llu",
+        kms,cms,kms==cms?"agree":"DIFFER",
+        (unsigned long long)boot_progress_frequency,(unsigned long long)gPEClockFrequencyInfo.timebase_frequency_hz);
       line(40,b,0xff00ccff);
     }
     // A panic on a secondary core flashes the panic screen while this monitor keeps running and redraws over it. Keep the
@@ -522,9 +528,10 @@ static void draw(unsigned now) {
       b[n]=0;line(45+j,b,0xffaaaaaa);
     }
   }
-  snprintf(b,sizeof(b),"OBS pulse-worker=%u anchor=%u bind=%u result=%u depth=%u base=%llx panel=%ux%u x%d (0=bound 1=invalid 2=UI owned)",
+  snprintf(b,sizeof(b),"OBS panel=%ux%u x%d bind=%u result=%u depth=%u worker=%u anchor=%u base=%llx",
+    display.width,display.height,display.scale,bind_count,bind_result,bind_depth,
     __atomic_load_n(&pulse_worker_status,__ATOMIC_ACQUIRE),__atomic_load_n(&pulse.ready,__ATOMIC_ACQUIRE),
-    bind_count,bind_result,bind_depth,(uint64_t)bind_base,display.width,display.height,display.scale);
+    (uint64_t)bind_base);
   if(&native_touch_stage_req && native_touch_stage_req && &native_touch_rows) {
     // Touch replaces the TIMER/OBS rows (42-43) while it is requested: its summary row and the HID report counters.
     line(42,native_touch_rows[0],0xff00ffcc);
@@ -543,9 +550,9 @@ static void draw(unsigned now) {
       vt*1000/freq,rt*1000/freq,blocks,blocks*4096>>20,__atomic_load_n(&native_ufs_block_reads,__ATOMIC_RELAXED));
     line(46,b,0xffffaa00);
   }
-  snprintf(b,sizeof(b),"MEM totalMiB=%llu free4K=%u active=%u inactive=%u wired=%u speculative=%u",
-    max_mem>>20,vm_page_free_count,vm_page_active_count,vm_page_inactive_count,
-    vm_page_wire_count,vm_page_speculative_count);line(35,b,0xffffff00);
+  snprintf(b,sizeof(b),"MEM free4K=%u wired=%u active=%u inactive=%u spec=%u",
+    vm_page_free_count,vm_page_wire_count,vm_page_active_count,vm_page_inactive_count,
+    vm_page_speculative_count);line(35,b,0xffffff00);
   if(&native_ram_block_sparse){
     snprintf(b,sizeof(b),"RAMDISK sparse=%u capacityMiB=%llu residentKiB=%llu; free min/reserved/target=%u/%u/%u",
       native_ram_block_sparse,native_ram_block_bytes>>20,native_ram_block_resident_bytes>>10,
@@ -648,10 +655,13 @@ void boot_progress_bind(uintptr_t base,unsigned w,unsigned h,unsigned rb,unsigne
       h >= 560 && h <= 4096 && rb >= w*4 && rb <= 65536 &&
       base <= UINTPTR_MAX-(uint64_t)h*rb) {
     // Cells are 6x14 at scale 1. A 1080x2160 panel (this device's ABL hands over a 1080x2160 cont_splash) would
-    // get 180 columns of 14-pixel-tall text, which no photograph resolves, so scale up as far as 90 columns and
-    // the 48 rows still fit. 2160-wide panels keep their 3x.
+    // get 180 columns of 14-pixel-tall text, which no photograph resolves. 2026-11-15: 2x was still unreadable on
+    // this panel, so every 1080-and-wider frame goes to 3x (60 columns at 1080, 80 at 1440) and the long rows were
+    // reordered to keep their key numbers in the leading columns.
     display.frame=base;display.width=w;display.height=h;display.stride=rb;
-    display.scale = w >= 2160 && h >= 1400 ? 3 : (w >= 1080 && h >= 1344 ? 2 : 1);
+    // 48 rows of 14 pixels at 3x need 2016 rows, so a frame shorter than that stays at 2x instead of losing its
+    // bottom half (rows past the frame height are silently skipped by bp_line).
+    display.scale = w >= 1080 && h >= 2016 ? 3 : (w >= 1080 && h >= 1344 ? 2 : 1);
     memset(display.previous,0xff,sizeof(display.previous));
     // Terminate the sentinels before strcmp.
     for(unsigned i=0;i<48;++i) display.previous[i][BP_COLS-1]=0;
