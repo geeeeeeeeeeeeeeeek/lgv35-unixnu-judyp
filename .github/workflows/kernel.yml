@@ -254,7 +254,6 @@ jobs:
             echo 'int enchilada_adreno_poll(void) { return 0; }'
             echo 'int enchilada_gauge_poll(void) { return 0; }'
             echo 'int enchilada_smmu_poll(void) { return 0; }'
-            echo 'int native_mobile_graphics_client_probe(void) { return 0; }'
             echo 'int sheng_pmgr_run(void) { return 0; }'
             echo 'long native_legacy_late_color_counts = 0;'
             echo 'long native_legacy_late_colors = 0;'
