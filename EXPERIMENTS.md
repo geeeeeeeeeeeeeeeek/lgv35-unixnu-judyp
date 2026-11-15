@@ -325,5 +325,20 @@
 - 上游仓库 `keyfan/UniXNU-enchilada-bringup` 只有 2 次 Data seed 运行、没有 kernel 运行，作者是在自己的 Mac 上带着旧 `out/enchilada/kernel/kernel.macho` 做的 —— 所以这条从零路径没有先例可抄。
 - 下一次运行：run 43646946066（`54f6985`）。
 
+### E46 种子构建打通，卡在上游额度
+
+一次完整的 macOS 运行约 20 分钟（长的时候 25+），为了不在每次改一行就重跑内核，拆成了「种子 + 正式」两段：
+
+- **种子构建**（`Build a seed kernel for the prelink audits`）：把 `judyp_defconfig` 派生一份 `judyp_seed_defconfig`，关掉 `XNU_SHENG_PMGR`、`XNU_NATIVE_LEGACY_DISPLAY`，删掉 8 个 archive（PMGR/显示/touch/cpufreq/dsi/gauge/smmu/adreno），另外 `-force_load` 一个只属于种子的桩库 `build/seed-stubs/libSeedStubs.a`。种子只要能链接出 `kernel.macho` + `kernel.json`，报告就拿去喂正式构建的 archive 09–23。
+- **桩的坑**：Mach-O 会给 C 标识符加一个前导下划线，桩名再写成 `_native_legacy_late_colors` 就变成 `__native_...`，ld 照旧报 `"_native_legacy_late_colors", referenced from _compose in libBootProgress.a[7](BootLog.o)`。改成不带下划线的名字 + `-fno-common` + `= 0` 初始化就解析了。另外 `native_mobile_graphics_client_probe` 不能出现在桩里：XNU 的 `IOUserClient.cpo` 自己就定义，会变成 duplicate symbol。
+- **报告要放两处**：`build-enchilada-storage.py` 原来只把候选复制到 `build/native-prelink/`，而上游 `audit-amfi-pmgr-contract.py`（archive-15 调）读的是 `build/xnu-prelink/native-owner-ufs-rootauth3-candidate.{macho,json}`。现在两处都放（`build-native-legacy-display.py` 早就是这么做的）。
+- **存储 ABI 审计不能审带 slide 的 prelink**：`audit-storage-interface-static.py` 在 `[kernel.prelink] slide = "-0x1000000"` 时会报 `Cannot uniquely identify the original block-storage dispatch (0 candidates)`——它自己的注释就说明这种板子要审 pinned kernelcache。所以候选（给下游读报告用）和审计对象（kernelcache）分开了：新增 `ENCHILADA_STORAGE_AUDIT_CANDIDATE` 指定审计对象，`ENCHILADA_STORAGE_CANDIDATE` 仍是种子。
+- **`pmgr=2`**：`scripts/unixnu/payload.py` 在 `native-ufs-root=1` 且开了 `CONFIG_XNU_OWNER_DATA_MOUNT` 时要求启动参数里恰好一个 `pmgr=2`（否则 `No PMGR` panic），而继承来的 kit 读的是 `sheng-pmgr`。两处一起改名成 `pmgr`（`kits/enchilada-pmgr/ShengPlatformPower.cpp` + `board.toml`）。
+- **`native_aks_device_id`**：当前 `drivers/AppleKeyStoreState` 子模块要求板子提供这个身份钩子（`size_t (uint8_t*, size_t)`，包成 AES key 用）。补在 `package/KeyStoreProbe.cpp`，返回固定的 `judyp:sdm845`，跨重启稳定。把 `unixnu_ref` 钉到 enchilada 用过的 `8ddccb1e` 也能绕开，但那个 ref 完全没有 UEFI 支持（`build-xnu-4k-baseline.sh` 里搜不到 uefi），所以选择补符号。
+- **`gSiliciumEntryArgHobGuid`**：`JudypBootMemoryDxe.inf` 的 `[Guids]` 引用了它，但上游 `SiliciumPkg.dec` 没有声明（enchilada 是靠 `make-enchilada-uefi.py` 打 SEC 补丁时才加进去的），于是 EDK II 直接 `build.py error 4000`。现在 `make-judyp-uefi.py` 只补这一行声明，**不打** SEC entry-arg 补丁：那是历史上把这个系列打进黑屏的改动（见上游文档 line 82）。代价是这个 DXE 运行时找不到 HOB、不发布 ramdisk 卷，payload 只能从真实分区（`payload.img` → `system_a`）加载，不能走 boot.img 里的 ramdisk。
+- **进度**：run 43679358255（`d1628815`）已经跑完种子 → 内核 → DarwinBoot → platform seed → Data seed 校验 → payload → staging，只在最后 `Build UniXNU package and firmware volume` 因那个 GUID 失败。修好后 run 43681159374（`cba0eb5b`）**没有启动**：`The job was not started because recent account payments have failed or your spending limit needs to be increased`——私有仓库的 macOS runner 按 10 倍折算，今天的 2000 分钟额度用完了。
+- **下一步（二选一）**：给账号加付款/提高 spending limit；或把仓库改成公开（公开仓库的 standard runner 不计量，macOS 也一样）。额度恢复后一条命令就能出全套产物：`dispatch-kernel-seeded.sh 43677790897`。
+
+
 
 
