@@ -254,13 +254,13 @@ jobs:
             echo 'int _enchilada_smmu_poll(void) { return 0; }'
             echo 'int _native_mobile_graphics_client_probe(void) { return 0; }'
             echo 'int _sheng_pmgr_run(void) { return 0; }'
-            echo 'long _native_legacy_late_color_counts;'
-            echo 'long _native_legacy_late_colors;'
-            echo 'long _native_legacy_late_count;'
-            echo 'long _native_legacy_late_stats;'
-            echo 'long _native_legacy_late_time;'
+            echo 'long _native_legacy_late_color_counts = 0;'
+            echo 'long _native_legacy_late_colors = 0;'
+            echo 'long _native_legacy_late_count = 0;'
+            echo 'long _native_legacy_late_stats = 0;'
+            echo 'long _native_legacy_late_time = 0;'
           } > build/seed-stubs/seed_stubs.c
-          clang -target arm64-apple-ios17 -c -o build/seed-stubs/seed_stubs.o build/seed-stubs/seed_stubs.c
+          clang -target arm64-apple-ios17 -fno-common -c -o build/seed-stubs/seed_stubs.o build/seed-stubs/seed_stubs.c
           ar rcs build/seed-stubs/libSeedStubs.a build/seed-stubs/seed_stubs.o
           ./unixnu defconfig judyp_seed_defconfig -D "$GITHUB_WORKSPACE/device"
           ENCHILADA_STORAGE_CANDIDATE="$GITHUB_WORKSPACE/$(ls out/ipsw/*/kernelcache.macho)" \
