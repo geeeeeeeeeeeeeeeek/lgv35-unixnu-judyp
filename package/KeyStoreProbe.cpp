@@ -42,6 +42,15 @@ uint32_t native_aks_lock_state(void) {
     }
     return (uint32_t)cached;
 }
+// The key wrapping key is derived from this identity, so the same bytes must come back at every boot or
+// the keychain items written on one boot cannot be opened on the next. This hardware has no SEP, so the
+// board's own name stands in for the SEP-derived UID.
+size_t native_aks_device_id(uint8_t *out, size_t capacity) {
+    static const char identity[] = "judyp:sdm845";
+    if (!out || capacity < sizeof identity - 1) return 0;
+    memcpy(out, identity, sizeof identity - 1);
+    return sizeof identity - 1;
+}
 static void aks_publish(void) {
     // Slot 0: counters; slot 1: selector:count tokens ('e' = the last answer was an error). Slots 2-3 belong to the Data store.
     char row[48];
