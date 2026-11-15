@@ -176,6 +176,20 @@ jobs:
           python3 device/scripts/compose-xnu-patches.py --write --unixnu "$GITHUB_WORKSPACE"
           python3 device/scripts/compose-xnu-patches.py --unixnu "$GITHUB_WORKSPACE"
 
+      # Runners are disposable, so there are no Docker layers to reuse. actions/cache is the equivalent:
+      # the key is a hash of the inputs, and a rerun that touches nothing they depend on restores the
+      # directory instead of rebuilding it. The two heaviest fixed costs are cached here; the compile
+      # itself is not, because XNU's build has no incremental support across machines.
+      #
+      # Layer 1: the IPSW components only change when the [ipsw] pin in board.toml changes.
+      - name: Restore the fetched IPSW components
+        uses: actions/cache@v4
+        with:
+          path: out/ipsw
+          key: ipsw-${{ hashFiles('device/board.toml') }}
+          restore-keys: |
+            ipsw-
+
       # Two inputs the kernel step needs before it starts: the pinned kernelcache (prelink) and the OS /
       # SystemOS envelopes that build-enchilada-verified-root.py hashes. Neither is part of the default
       # [ipsw] fetch list, which only names the small components. The audit is here because the seed
@@ -206,7 +220,20 @@ jobs:
       #   * the storage archive audits the pinned kernelcache, which it already accepts.
       # The seed prelinks against the same kernelcache, leaving out-seed/kernel.macho + kernel.json --
       # the pair every dropped archive audits in the real build below.
+      # Layer 2: the seed prelink is a full kernel build in disguise, so caching it removes the largest
+      # fixed cost of a rerun. The key covers every input the prelink depends on -- the configs, the
+      # board file, the board's own sources and patches, the UEFI overlay -- plus the refs and Xcode.
+      - name: Restore the seed prelink
+        id: seedcache
+        uses: actions/cache@v4
+        with:
+          path: out-seed
+          key: seed-${{ hashFiles('device/configs/**', 'device/board.toml', 'device/kits/**', 'device/package/**', 'device/patches/**', 'device/overlay/**', 'device/scripts/**') }}-${{ inputs.unixnu_ref }}-${{ inputs.xcode }}
+          restore-keys: |
+            seed-
+
       - name: Build a seed kernel for the prelink audits
+        if: steps.seedcache.outputs.cache-hit != 'true'
         env:
           UNIXNU_UEFI: ${{ github.workspace }}/../Mu-Silicium
           # prepare-xnu-source.py runs inside the bootstrap pass and calls the GitHub API for the
@@ -289,6 +316,18 @@ jobs:
           echo "ENCHILADA_STORAGE_AUDIT=$GITHUB_WORKSPACE/device/build/storage-abi/interface-audit.json" >> "$GITHUB_ENV"
           echo "ENCHILADA_STORAGE_AUDIT_CANDIDATE=$GITHUB_WORKSPACE/$(ls out/ipsw/*/kernelcache.macho)" >> "$GITHUB_ENV"
           ./unixnu defconfig judyp_defconfig -D "$GITHUB_WORKSPACE/device"
+
+      # Runs whether the seed was just built or came from the cache: the kernel build reads these three
+      # variables, and a cache hit skips the step that writes them.
+      - name: Publish the seed prelink to the kernel build
+        run: |
+          seed="$GITHUB_WORKSPACE/out-seed/kernel.macho"
+          test -f "$seed" || { echo "::error::no seed prelink in out-seed"; exit 1; }
+          test -f "${seed%.macho}.json" || { echo "::error::no prelink report next to the seed"; exit 1; }
+          echo "seed prelink: $seed ($(wc -c < "$seed") bytes)"
+          echo "ENCHILADA_STORAGE_CANDIDATE=$seed" >> "$GITHUB_ENV"
+          echo "ENCHILADA_STORAGE_AUDIT=$GITHUB_WORKSPACE/device/build/storage-abi/interface-audit.json" >> "$GITHUB_ENV"
+          echo "ENCHILADA_STORAGE_AUDIT_CANDIDATE=$GITHUB_WORKSPACE/$(ls out/ipsw/*/kernelcache.macho)" >> "$GITHUB_ENV"
 
       - name: Build kernel
         id: kernel
