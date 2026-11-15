@@ -47,7 +47,8 @@ def declare_boot_shim_size(uefi):
     shim = uefi / 'BootShim/BootShim.S'
     text = shim.read_text(encoding='utf-8')
     if SHIM_SIZE_LINE not in text:
-        if SHIM_SIZE_PATCHED in text:
+        # Local trees that carry the older hand-written line already describe the whole image.
+        if SHIM_SIZE_PATCHED in text or '_Payload - _Head' in text:
             return
         raise SystemExit(f'neither the stock nor the patched image size line is in {shim}')
     shim.write_text(text.replace(SHIM_SIZE_LINE, SHIM_SIZE_PATCHED), encoding='utf-8')

@@ -643,7 +643,11 @@ void boot_progress_bind(uintptr_t base,unsigned w,unsigned h,unsigned rb,unsigne
   if (base >= 0xffff000000000000ULL && depth == 32 && w >= 720 && w <= 4096 &&
       h >= 560 && h <= 4096 && rb >= w*4 && rb <= 65536 &&
       base <= UINTPTR_MAX-(uint64_t)h*rb) {
-    display.frame=base;display.width=w;display.height=h;display.stride=rb;display.scale=w>=2160 && h>=1400?3:1;
+    // Cells are 6x14 at scale 1. A 1080x2160 panel (this device's ABL hands over a 1080x2160 cont_splash) would
+    // get 180 columns of 14-pixel-tall text, which no photograph resolves, so scale up as far as 90 columns and
+    // the 48 rows still fit. 2160-wide panels keep their 3x.
+    display.frame=base;display.width=w;display.height=h;display.stride=rb;
+    display.scale = w >= 2160 && h >= 1400 ? 3 : (w >= 1080 && h >= 1344 ? 2 : 1);
     memset(display.previous,0xff,sizeof(display.previous));
     // Terminate the sentinels before strcmp.
     for(unsigned i=0;i<48;++i) display.previous[i][BP_COLS-1]=0;
