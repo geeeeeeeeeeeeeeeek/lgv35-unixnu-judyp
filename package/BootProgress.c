@@ -261,6 +261,111 @@ static int take(void) {
   return 1;
 }
 static void release(void) { __atomic_store_n(&busy, 0, __ATOMIC_RELEASE); }
+
+// ---- M4: early GICv3 bring-up ---------------------------------------------------------------
+// IOKit matching (PE_lockdown_iokit -> startIOServiceMatching) waits for a timer tick, and the tick
+// cannot arrive because the GIC CPU interface is only opened by ArmCpu's IOService start(), which is
+// itself waiting for matching: a deadlock that panics nowhere. So the GIC is opened here, in the
+// pexpert stage, before matching starts, with the same sequence ArmCpu.cpp uses: distributor with
+// ARE_NS + EnableGrp1NS, this core's redistributor awake, ICC_* CPU interface on, and INTID 19
+// (armcpu-timer-intid=19: SDM845 routes the timer as PPI 3) handed to rtclock_intr.
+enum { GicdPa = 0x17a00000, GicrPa = 0x17a60000, GicdBytes = 0x10000, GicrBytes = 0x100000, GicTimerIntid = 19 };
+volatile unsigned bp_egic_state, bp_egic_error, bp_egic_irqs, bp_egic_other;
+volatile uint32_t bp_egic_regs[6];   // GICD_CTLR, GICR_TYPER affinity, GICR_WAKER, GICR_ISENABLER0, ICC_PMR_EL1, ICC_IGRPEN1_EL1
+static uintptr_t bp_egic_gicd, bp_egic_redist;
+
+static inline uint32_t egic_rd(uintptr_t base, unsigned offset) { return *(volatile uint32_t *)(base + offset); }
+static inline void egic_wr(uintptr_t base, unsigned offset, uint32_t value) {
+  *(volatile uint32_t *)(base + offset) = value;
+  __asm__ volatile("dsb sy" ::: "memory");
+}
+// GICD_CTLR.RWP: the distributor refuses another CTLR write until this clears.
+static int egic_wait_rwp(uintptr_t gicd) {
+  for (unsigned i = 0; i < 1000000; ++i) if ((egic_rd(gicd, 0) & 0x80000000U) == 0) return 0;
+  return -1;
+}
+// Anything that is not the timer is masked at the GIC before its EOI: an unclaimed level source
+// would otherwise re-enter this handler forever (ArmCpu::interrupt guards the same way).
+static void egic_mask_intid(uint32_t intid) {
+  if (intid < 32) { if (bp_egic_redist) egic_wr(bp_egic_redist + 0x10000, 0x180, 1U << intid); }
+  else if (bp_egic_gicd) { egic_wr(bp_egic_gicd, 0x180 + (intid / 32) * 4, 1U << (intid % 32)); }
+}
+static void bp_egic_irq(void *target, void *refcon, void *nub, int source) {
+  (void)target; (void)refcon; (void)nub; (void)source;
+  for (unsigned drained = 0; drained < 4096; ++drained) {
+    uint64_t id;
+    __asm__ volatile("mrs %0, icc_iar1_el1" : "=r"(id));
+    if ((id & 0xffffffU) >= 1020) return;
+    if ((id & 0xffffffU) == GicTimerIntid) { ++bp_egic_irqs; rtclock_intr(0); }
+    else { ++bp_egic_other; egic_mask_intid((uint32_t)(id & 0xffffffU)); }
+    __asm__ volatile("msr icc_eoir1_el1, %0\n\tisb" :: "r"(id) : "memory");
+  }
+}
+static void boot_progress_early_gic(void) {
+  uint64_t daif;
+  if (bp_egic_state) return;
+  bp_egic_state = 1;
+  __asm__ volatile("mrs %0, daif" : "=r"(daif));
+  __asm__ volatile("msr daifset, #2" ::: "memory");
+  uintptr_t gicd = (uintptr_t)ml_io_map(GicdPa, GicdBytes);
+  uintptr_t gicr = (uintptr_t)ml_io_map(GicrPa, GicrBytes);
+  if (!gicd) { bp_egic_error = 1; goto done; }
+  if (!gicr) { bp_egic_error = 2; goto done; }
+  if (((egic_rd(gicd, 0xffe8) >> 4) & 15) != 3) { bp_egic_error = 3; goto done; }
+  bp_egic_gicd = gicd;
+  uint32_t gicdCtl = egic_rd(gicd, 0);
+  bp_egic_regs[0] = gicdCtl;
+  if ((gicdCtl & 0x10U) == 0) {
+    egic_wr(gicd, 0, gicdCtl | 0x10U);
+    if (egic_wait_rwp(gicd) != 0) { bp_egic_error = 4; goto done; }
+    gicdCtl = egic_rd(gicd, 0);
+  }
+  egic_wr(gicd, 0, gicdCtl | 0x12U);   // ARE_NS stays, EnableGrp1NS on
+  if (egic_wait_rwp(gicd) != 0) { bp_egic_error = 4; goto done; }
+  bp_egic_regs[0] = egic_rd(gicd, 0);
+  // This core's redistributor frame, found by its affinity, exactly as wakeRedistributor does.
+  uint64_t mpidr;
+  __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
+  uint32_t want = (uint32_t)((mpidr & 0xffffffU) | ((mpidr >> 8) & 0xff000000U));
+  uintptr_t frame = 0;
+  for (uint64_t offset = 0; offset + 0x20000 <= GicrBytes; ) {
+    uint64_t typer = *(volatile uint64_t *)(gicr + offset + 8);
+    if ((uint32_t)(typer >> 32) == want) { frame = gicr + offset; bp_egic_regs[1] = want; break; }
+    if ((typer & 16) != 0) break;
+    offset += (typer & 2) != 0 ? 0x40000 : 0x20000;
+  }
+  if (!frame) { bp_egic_error = 5; goto done; }
+  bp_egic_redist = frame;
+  egic_wr(frame, 0x14, egic_rd(frame, 0x14) & ~2U);   // WAKER: clear ProcessorSleep
+  uintptr_t awakened = 0;
+  for (unsigned i = 0; i < 1000000; ++i) { if ((egic_rd(frame, 0x14) & 4U) == 0) { awakened = 1; break; } }
+  bp_egic_regs[2] = egic_rd(frame, 0x14);
+  if (!awakened) { bp_egic_error = 6; goto done; }
+  // Same install the CPU driver does for a secondary core: this core's cpu_data gets the handler.
+  ml_install_interrupt_handler(0, 0, 0, bp_egic_irq, 0);
+  egic_wr(frame + 0x10000, 0x100, 0xffffU | (1U << GicTimerIntid));   // SGIs 0-15 and the timer PPI
+  bp_egic_regs[3] = egic_rd(frame + 0x10000, 0x100);
+  uint64_t sre;
+  __asm__ volatile("mrs %0, icc_sre_el1" : "=r"(sre));
+  sre |= 1;
+  __asm__ volatile("msr icc_sre_el1, %0\n\tisb" :: "r"(sre) : "memory");
+  __asm__ volatile("mrs %0, icc_sre_el1" : "=r"(sre));
+  if ((sre & 1) == 0) { bp_egic_error = 7; goto done; }
+  uint64_t iccCtlr;
+  __asm__ volatile("mrs %0, icc_ctlr_el1" : "=r"(iccCtlr));
+  iccCtlr &= ~2ULL;                                    // EOImode 0: EOIR also deactivates
+  __asm__ volatile("msr icc_ctlr_el1, %0" :: "r"(iccCtlr) : "memory");
+  uint64_t pmr = 0xff, bpr = 0, one = 1;
+  __asm__ volatile("msr icc_pmr_el1, %0" :: "r"(pmr) : "memory");
+  __asm__ volatile("msr icc_bpr1_el1, %0" :: "r"(bpr) : "memory");
+  __asm__ volatile("msr icc_igrpen1_el1, %0\n\tdsb sy\n\tisb" :: "r"(one) : "memory");
+  __asm__ volatile("mrs %0, icc_pmr_el1" : "=r"(pmr));
+  __asm__ volatile("mrs %0, icc_igrpen1_el1" : "=r"(iccCtlr));
+  bp_egic_regs[4] = (uint32_t)pmr;
+  bp_egic_regs[5] = (uint32_t)iccCtlr;
+done:
+  __asm__ volatile("msr daif, %0" :: "r"(daif) : "memory");
+}
 // The text of every page row and of the last banner paint, for the UFS log (BootLog.c).
 char boot_progress_page_text[48][BP_COLS];
 char boot_progress_banner_text[49][120];
@@ -437,8 +542,12 @@ static void draw(unsigned now) {
         if(armcpu_smp_fail[c]&&n<sizeof(b)-14)n+=(unsigned)snprintf(b+n,sizeof(b)-n,"!fail%u",armcpu_smp_fail[c]);
       }
       line(38,b,0xff00ff88);
-      snprintf(b,sizeof(b),"GIC stride=%x last redistributor read: offset=%x typer.lo=%x",
-        armcpu_gic_stride,armcpu_gic_typer_probe[0],armcpu_gic_typer_probe[1]);
+      // The one row that says whether any IRQ can be delivered at all: the early bring-up's
+      // readbacks (ctl = GICD_CTLR, ty = this core's GICR_TYPER affinity, wk = GICR_WAKER,
+      // isen = GICR_ISENABLER0, pmr/ig1 = ICC_PMR/ICC_IGRPEN1) and what the handler has seen.
+      snprintf(b,sizeof(b),"GIC ctl=%x ty=%x wk=%x isen=%x pmr=%x ig1=%x irq=%u oth=%u err=%u",
+        bp_egic_regs[0],bp_egic_regs[1],bp_egic_regs[2],bp_egic_regs[3],bp_egic_regs[4],bp_egic_regs[5],
+        bp_egic_irqs,bp_egic_other,bp_egic_error);
       line(30,b,0xff00ff88);
     }
     if(&native_cpufreq_stage && native_cpufreq_stage>=2)line(39,native_cpufreq_row,0xff00ccff);
@@ -636,6 +745,9 @@ void boot_progress_cancel_scanout(void) {
 }
 void boot_progress_init(void) {
   unsigned opt=0;
+  // Independent of boot-progress=: IOKit matching cannot finish without a timer tick, and this is
+  // the last pexpert hook before it starts (see boot_progress_early_gic).
+  boot_progress_early_gic();
   if (!PE_parse_boot_argn("boot-progress",&opt,sizeof(opt)) || (opt != 1 && opt != 2)) return;
   __asm__ volatile("mrs %0,cntfrq_el0" : "=r"(boot_progress_frequency));
   if (!boot_progress_frequency) return;
