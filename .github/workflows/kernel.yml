@@ -197,73 +197,47 @@ jobs:
               --prelinked "$cand" --slide=-0x1000000 --out device/build/storage-abi
           echo "kernelcache audit: $(wc -c < "$cand") bytes"
 
-      # A from-scratch build cannot satisfy the archives that audit a *prelink report*
-      # (build-sheng-platform-power.py, build-native-legacy-display.py and the probe archives): the
-      # report is a product of a finished build. The way out is a throwaway seed build that:
-      #   * drops exactly those archives, and the two XNU_* features only they provide;
-      #   * keeps everything else, including UFS / owner-root / verified-root / boot progress, which
-      #     depend on each other (boot progress refuses to build without the audited UFS root);
-      #   * audits the pinned kernelcache for the storage archive, which has no prelink to read yet.
-      # It links, then prelinks against that same kernelcache, and leaves out-seed/kernel.macho with
-      # kernel.json beside it -- the pair every dropped archive audits in the real build below.
-      - name: Build a seed kernel for the prelink audits
-        env:
-          UNIXNU_UEFI: ${{ github.workspace }}/../Mu-Silicium
+      # Every archive that audits a prelink (storage, PMGR, display, the probes) reads a *prelink
+      # report*, which is a product of a finished build -- so a from-scratch build has nothing to audit.
+      # The reference those audits need, though, is only the original kernelcache's own layout at the
+      # board's slide: build-enchilada-storage.py says "any prelink of the same kernelcache qualifies",
+      # the addresses being module-relative. So prelink the pinned kernelcache against itself once and
+      # put the result where each audit looks. The real build then prelinks the real kernel on top of
+      # the same cache, and the artifact it ships is that one, not this reference.
+      - name: Prepare a prelink reference from the pinned kernelcache
         run: |
           set -eu
-          cp device/board.toml /tmp/board.toml.device
-          python3 - <<'PY'
-          import pathlib
-          import re
+          kc=$(ls out/ipsw/*/kernelcache.decompressed | head -1)
+          cp "$kc" /tmp/kernelcache.macho
+          mkdir -p out-seed
+          python3 - "$GITHUB_WORKSPACE/kits/XnuPrelink/emit_prelink.py" /tmp/kernelcache.macho "$kc" <<'PY'
+          import subprocess
+          import sys
+          import tomllib
 
-          root = pathlib.Path('device')
-
-          # Two features whose only provider is a dropped archive.
-          off = {'XNU_SHENG_PMGR', 'XNU_NATIVE_LEGACY_DISPLAY'}
-          # Only the archive that survives stays force-loaded.
-          extra = '-Wl,-force_load,{tree}/build/enchilada-dwc3/libNativeDwc3.a'
-          out = []
-          for line in (root / 'configs/judyp_defconfig').read_text().splitlines():
-              m = re.match(r'CONFIG_(\w+)=', line)
-              if m and m.group(1) in off:
-                  out.append(f'CONFIG_{m.group(1)}=n')
-              elif m and m.group(1) == 'XNU_EXTRA_LD_ARCHIVES':
-                  out.append(f'CONFIG_XNU_EXTRA_LD_ARCHIVES="{extra}"')
-              else:
-                  out.append(line)
-          (root / 'configs/judyp_seed_defconfig').write_text('\n'.join(out) + '\n')
-
-          drop = ('build-sheng-platform-power.py', 'build-native-legacy-display.py',
-                  'build-enchilada-touch.py', 'build-enchilada-cpufreq.py',
-                  'build-enchilada-msm-dsi.py', 'build-enchilada-gauge.py',
-                  'build-enchilada-smmu.py', 'build-enchilada-adreno.py')
-          lines = (root / 'board.toml').read_text().splitlines()
-          start = next(i for i, l in enumerate(lines) if l.strip() == 'archives = [')
-          end = next(i for i in range(start, len(lines)) if lines[i].strip() == ']')
-          kept = [l for l in lines[start + 1:end]
-                  if l.strip().startswith('"') and not any(k in l for k in drop)]
-          (root / 'board.toml').write_text('\n'.join(lines[:start + 1] + kept + lines[end:]) + '\n')
-          print('seed archives:', len(kept))
+          tool, kernel, cache = sys.argv[1:4]
+          spec = tomllib.load(open('device/board.toml', 'rb'))['kernel']['prelink']
+          command = ['python3', tool, '--kernel', kernel, '--prelinked', cache,
+                     f"--slide={spec.get('slide', '0')}", '--output', 'out-seed/kernel.macho']
+          for root in spec.get('roots', []):
+              command += ['--root', root]
+          if spec.get('early_security_init'):
+              command += ['--early-security-init', spec['early_security_init']]
+          subprocess.run(command, check=True)
           PY
-          ./unixnu defconfig judyp_seed_defconfig -D "$GITHUB_WORKSPACE/device"
-          ENCHILADA_STORAGE_CANDIDATE="$GITHUB_WORKSPACE/$(ls out/ipsw/*/kernelcache.macho)" \
-          ENCHILADA_STORAGE_AUDIT="$GITHUB_WORKSPACE/device/build/storage-abi/interface-audit.json" \
-            ./unixnu build kernel -D "$GITHUB_WORKSPACE/device"
-
-          # Copy the seed out of the build output before the real build overwrites out/judyp/kernel.
-          mkdir -p "$GITHUB_WORKSPACE/out-seed"
-          cp out/judyp/kernel/kernel.macho "$GITHUB_WORKSPACE/out-seed/kernel.macho"
-          cp out/judyp/kernel/kernel.json "$GITHUB_WORKSPACE/out-seed/kernel.json"
-
-          cp /tmp/board.toml.device device/board.toml
-          seed="$GITHUB_WORKSPACE/out-seed/kernel.macho"
-          test -f "$seed"
-          test -f "${seed%.macho}.json"
-          echo "seed prelink: $seed ($(wc -c < "$seed") bytes)"
-          # The real build audits the seed; ENCHILADA_STORAGE_AUDIT stays unset so the storage archive
-          # re-audits the seed image instead of comparing it with the kernelcache audit above.
-          echo "ENCHILADA_STORAGE_CANDIDATE=$seed" >> "$GITHUB_ENV"
-          ./unixnu defconfig judyp_defconfig -D "$GITHUB_WORKSPACE/device"
+          test -f out-seed/kernel.macho
+          test -f out-seed/kernel.json
+          # Where the audits look, with both names they glob for.
+          for d in device/build/xnu-prelink device/build/native-prelink; do
+            mkdir -p "$d"
+            for n in native-owner-ufs-rootauth3-candidate native-owner-ufs-cpu-desktop-1-candidate; do
+              cp out-seed/kernel.macho "$d/$n.macho"
+              cp out-seed/kernel.json "$d/$n.json"
+            done
+          done
+          echo "reference prelink: $(wc -c < out-seed/kernel.macho) bytes"
+          echo "ENCHILADA_STORAGE_CANDIDATE=$GITHUB_WORKSPACE/out-seed/kernel.macho" >> "$GITHUB_ENV"
+          echo "ENCHILADA_DISPLAY_CANDIDATE=$GITHUB_WORKSPACE/out-seed/kernel.macho" >> "$GITHUB_ENV"
 
       - name: Build kernel
         id: kernel
