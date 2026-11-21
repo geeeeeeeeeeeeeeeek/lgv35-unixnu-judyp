@@ -684,4 +684,16 @@ reboot
 - 基线对照：`b0bae2a` 的 68 补丁同法 0 失败 → 说明 gate 忠实复刻 CI。
 - 修复后结果：70 补丁三遍 **0 失败**，`BC50 DTAlloc enter`、`UNI_BC` 宏均在最终树中。
 - 规则：**此 gate 不过不 dispatch**，已写入 AGENTS.md。
+- 固化：门禁脚本入仓 `scripts/check-xnu-patch-replay.sh`（按 `unixnu.lock` 解析 rev、缓存 tarball、复刻三遍重放，输出 `TOTAL_FAILURES=`）。`XNU_CACHE` 可指向已解好的 `/root/ckwork` 复用源码。
+
+**第四次 CI**：commit `dd56fc9` → run `44881154684`，2026-11-21 07:38Z 起（inputs 同上）。
+- dispatch 前门禁实跑：`series: 70 patches` → pass1/pass2/pass3 全空 → `TOTAL_FAILURES=0`。
+- 本轮提交内容：删除 startup patch 的 bsd_init.c 段、AGENTS.md 加 dispatch 门禁、门禁脚本入仓。
+
+**第四次 CI 结果：补丁全过、内核/DarwinBoot 全过，败在 step 22 `build payload`（未刷机）**
+- 错误：`unixnu: CONFIG_XNU_OWNER_DATA_MOUNT requires --data-ramdisk FILE (or [build] data_ramdisk); persistent Data still needs its original seed to publish the volume`
+- 原因：本次 dispatch 漏传 `data_seed_run_id`。workflow 只在 `inputs.data_seed_run_id != ''` 时才下载 seed 并给 `build payload` 加 `--data-ramdisk /tmp/data-seed/data-linux.dbr`；defconfig `CONFIG_XNU_OWNER_DATA_MOUNT=y` 强制要求该参数。
+- 佐证：`configs/judyp_defconfig:95` 的 `CONFIG_XNU_OWNER_DATA_VOLUME_UUID="18AB5557-DC2D-469B-8758-855E60F5B0DF"`；Data seed run `43677790897` 的 artifact `data-seed-linux` 已本地校验：`volume_uuid` 与之一致，`role=[]`，未过期（2027-02-13）。
+- 注意：artifact zip 必须带 `Accept: application/vnd.github+json` 才返回 302，否则 404；`unzip` 在 WSL 里没有，用 python zipfile。
+- 第五次 dispatch 参数：`defconfig=judyp_defconfig, xcode=26.6, seed_warm=true, data_seed_run_id=43677790897`。
 
