@@ -732,3 +732,33 @@ reboot
 
 门禁：同前（本地 70+1 补丁三遍重放 `TOTAL_FAILURES=0`），CI 绿后 `llvm-strings` 验 BC34–36，再刷 A 槽。
 
+**R-DT2 判读（2026-11-21 16:5x 照片）**
+- stage 末行 = `BC36 StartIOKitMatching end`；可见 `BC31 → BC32 → BC33 → BC34 → BC35 → BC36`。
+- 结论：`StartIOKitMatching` **完整返回**；`OSKext::iokitDaemonAvailable()` 与 `adjustBusy(1)` 均未卡。卡点已转移到 `PE_lockdown_iokit` 返回之后的 `startup.c` 主链（`vm_set_restrictions` → `kperf_init_early` → `bsd_init`）。
+
+**R-DT3 预登记（`startup.c` lockdown 之后）**
+
+| 标识 | 位置（`osfmk/kern/startup.c`） |
+|---|---|
+| BC37 | `PE_lockdown_iokit()` 返回后（原 UNI_CK #27） |
+| BC38 | `vm_set_restrictions(machine_info.max_cpus)` 返回后 |
+| BC39 | `kperf_init_early()` 返回后（原 UNI_CK #28） |
+| BC44 | `bsd_init()` 之前（原 UNI_CK #29） |
+
+判定表：
+
+| 末行 | 判读 |
+|---|---|
+| 仍 `BC36`、无 `BC37` | 卡在 `PE_lockdown_iokit` 返回路径 / `#ifdef IOKIT` 出口 |
+| `BC37` | 卡在 `vm_set_restrictions` |
+| `BC38` | 卡在 `kperf_init_early` |
+| `BC39` | 卡在 `bsd_init` 之前段（`MACH_BSD` 入口、线程/栈准备） |
+| `BC44` | 已进入 `bsd_init` → 下一轮转到 bsd_init 内部 |
+
+门禁：本地 71 补丁三遍重放 `TOTAL_FAILURES=0`。
+
+实现补充（R-DT3）：
+- 文本检查点折进 `zzzzzzzz-startup-chain-checkpoints.patch` 本身（不能由后置补丁改前补丁新增的行，否则 CI 第二遍反查必挂）。
+- 交叉检查已写入 `scripts/check-xnu-patch-replay.sh`：重放后必须仍能 grep 到 `BC36/BC37/BC38/BC39/BC44/BC50`，且 `bsd_init.c` 的 `bsd_init_kprintf` 必须路由到 `boot_progress_stage`（`MARK_FAILURES=0`）。
+- `bsd_init` 内部本来就有稠密输出：每个 `bsd_init_kprintf("calling ...")` 都直接转成 stage 文本（`zzz-boot-progress.patch` 已改写宏）。因此这一轮一次验证可覆盖：`BC37 → BC38 → BC39 → BC44 → bsd_init: calling dev_kmem_init / kauth_init / ... → vfs_mountroot → VFS_ROOT`，不必逐点分包。
+

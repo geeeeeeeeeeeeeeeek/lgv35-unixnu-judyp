@@ -91,5 +91,20 @@ for p in $(ls "$SER"/*.patch | sort); do
 done
 
 echo "failures=$FAILS"
-echo "TOTAL_FAILURES=$FAILS"
-exit $([ "$FAILS" -eq 0 ] && echo 0 || echo 1)
+
+# static cross-check: the expected checkpoint marks must survive the final pass
+MARK_FAILS=0
+for m in 'BC37 lockdown returned' 'BC38 vm_set_restrictions done' 'BC39 kperf early done' 'BC44 enter bsd_init' 'BC36 StartIOKitMatching end' 'BC50 DTAlloc enter'; do
+  if ! grep -rqF "$m" --include='*.c' --include='*.cpp' .; then
+    echo "MARK MISSING: $m"
+    MARK_FAILS=$((MARK_FAILS+1))
+  fi
+done
+grep -qF 'boot_progress_stage("bsd_init: " x)' bsd/kern/bsd_init.c || {
+  echo "MARK MISSING: bsd_init_kprintf -> boot_progress_stage"; MARK_FAILS=$((MARK_FAILS+1)); }
+echo "MARK_FAILURES=$MARK_FAILS"
+
+TOTAL=$((FAILS+MARK_FAILS))
+echo "TOTAL_FAILURES=$TOTAL"
+exit $([ "$TOTAL" -eq 0 ] && echo 0 || echo 1)
+

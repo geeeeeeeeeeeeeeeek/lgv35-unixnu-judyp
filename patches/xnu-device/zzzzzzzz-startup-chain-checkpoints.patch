@@ -1,55 +1,39 @@
-Extend the vm_page_wire_count checkpoint chain past PE_lockdown_iokit (judyp bring-up).
-
-The R-CK patch (zzzzzzzz-native-iokit-rootnub.patch -- one 'z' less) instrumented N=0..26 and
-left the chain blind exactly at the point where the panel's stage history ends
-(PE_lockdown_iokit) and where the sampled PC lives (_memmove+0xc4, sampled for 8 s).  This
-patch adds checkpoints 27..29 WITHOUT touching any 0..26 site, so a single photograph of the
-new kernel still answers the R-CK reading first (N=(wired-56772)/4, N<=26 means the old
-reading applies verbatim) and only then the new segment:
-
- 27 PE_lockdown_iokit returned   28 kperf_init_early returned   29 about to enter bsd_init
-
-The former 30..33 sites in bsd_init.c are dropped: any insertion there lands inside the trailing
-context of a shared patch's hunk (zzz-boot-progress.patch at `#endif` / `throttle_init`), and the
-CI build replays every patch backwards on the already-patched tree, so the reverse check would fail.
-
-Caveat recorded in EXPERIMENTS.md: past IOKit matching, vm_page_wire_count also grows
-naturally (vfsinit, buffer cache, mountroot), so N>=29 readings can be polluted by natural
-wiring.  A value that is 56772+4*N with N in 27..29 and no other panel change is still a
-strong ordering signal; a wildly larger value means execution ran past IOKit and the stall
-is inside or after bsd_init.
 --- a/osfmk/kern/startup.c
 +++ b/osfmk/kern/startup.c
-@@ -880,9 +880,15 @@
+@@ -796,25 +796,36 @@
  	kernel_bootstrap_log("kernel_do_post - done");
  #endif /* CONFIG_XNUPOST */
  
-+/* UNI_CK: see zzzzzzz-native-iokit-rootnub.patch -- every site bumps vm_page_wire_count
-+ * by 4; sites 27..29 continue the table in pexpert/arm/pe_init.c past PE_lockdown_iokit. */
++/* UNI_CK: see zzzzzzzz-native-iokit-rootnub.patch -- every site bumps vm_page_wire_count
++ * by 4 and reports through boot_progress_stage; sites 27..29 continue the table in
++ * pexpert/arm/pe_init.c past PE_lockdown_iokit. */
 +extern unsigned int vm_page_wire_count;
++extern void boot_progress_stage(const char *text) __attribute__((weak_import));
++#define UNI_BC(text) do { if (boot_progress_stage) boot_progress_stage(text); vm_page_wire_count += 4; } while (0)
 +
  #ifdef  IOKIT
  	kernel_bootstrap_log("PE_lockdown_iokit");
  	PE_lockdown_iokit();
-+	/* UNI_CK #27: PE_lockdown_iokit returned. */
-+	vm_page_wire_count += 4;
++	UNI_BC("BC37 lockdown returned");
  #endif
  	/*
  	 * max_cpus must be nailed down by the time PE_lockdown_iokit() finishes,
-@@ -893,12 +899,16 @@
+ 	 * at the latest
+ 	 */
+ 	vm_set_restrictions(machine_info.max_cpus);
++	UNI_BC("BC38 vm_set_restrictions done");
+ 
  
  #if KPERF
  	kperf_init_early();
-+	/* UNI_CK #28: kperf_init_early returned. */
-+	vm_page_wire_count += 4;
++	UNI_BC("BC39 kperf early done");
  #endif
  
  	/*
  	 *	Start the user bootstrap.
  	 */
  #ifdef  MACH_BSD
-+	/* UNI_CK #29: about to enter bsd_init. */
-+	vm_page_wire_count += 4;
++	UNI_BC("BC44 enter bsd_init");
  	bsd_init();
  #endif
  
