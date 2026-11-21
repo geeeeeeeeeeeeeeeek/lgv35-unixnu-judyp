@@ -1,15 +1,14 @@
 --- a/osfmk/kern/startup.c
 +++ b/osfmk/kern/startup.c
-@@ -796,25 +796,36 @@
+@@ -796,25 +796,35 @@
  	kernel_bootstrap_log("kernel_do_post - done");
  #endif /* CONFIG_XNUPOST */
  
 +/* UNI_CK: see zzzzzzzz-native-iokit-rootnub.patch -- every site bumps vm_page_wire_count
 + * by 4 and reports through boot_progress_stage; sites 27..29 continue the table in
-+ * pexpert/arm/pe_init.c past PE_lockdown_iokit. */
++ * pexpert/arm/pe_init.c past PE_lockdown_iokit. boot_progress.h is already included. */
 +extern unsigned int vm_page_wire_count;
-+extern void boot_progress_stage(const char *text) __attribute__((weak_import));
-+#define UNI_BC(text) do { if (boot_progress_stage) boot_progress_stage(text); vm_page_wire_count += 4; } while (0)
++#define UNI_BC(text) do { boot_progress_stage(text); vm_page_wire_count += 4; } while (0)
 +
  #ifdef  IOKIT
  	kernel_bootstrap_log("PE_lockdown_iokit");

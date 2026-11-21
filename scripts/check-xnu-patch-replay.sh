@@ -102,6 +102,11 @@ for m in 'BC37 lockdown returned' 'BC38 vm_set_restrictions done' 'BC39 kperf ea
 done
 grep -qF 'boot_progress_stage("bsd_init: " x)' bsd/kern/bsd_init.c || {
   echo "MARK MISSING: bsd_init_kprintf -> boot_progress_stage"; MARK_FAILS=$((MARK_FAILS+1)); }
+# C sources cannot carry the C++-only weak_import attribute; boot_progress.h already declares it.
+if grep -rn 'weak_import' osfmk/kern/startup.c bsd/kern/bsd_init.c >/dev/null 2>&1; then
+  echo "MARK INVALID: weak_import in a C source"; MARK_FAILS=$((MARK_FAILS+1)); fi
+grep -qF '#define UNI_BC(text) do { boot_progress_stage(text);' osfmk/kern/startup.c || {
+  echo "MARK MISSING: startup.c UNI_BC"; MARK_FAILS=$((MARK_FAILS+1)); }
 echo "MARK_FAILURES=$MARK_FAILS"
 
 TOTAL=$((FAILS+MARK_FAILS))

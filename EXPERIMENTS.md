@@ -762,3 +762,10 @@ reboot
 - 交叉检查已写入 `scripts/check-xnu-patch-replay.sh`：重放后必须仍能 grep 到 `BC36/BC37/BC38/BC39/BC44/BC50`，且 `bsd_init.c` 的 `bsd_init_kprintf` 必须路由到 `boot_progress_stage`（`MARK_FAILURES=0`）。
 - `bsd_init` 内部本来就有稠密输出：每个 `bsd_init_kprintf("calling ...")` 都直接转成 stage 文本（`zzz-boot-progress.patch` 已改写宏）。因此这一轮一次验证可覆盖：`BC37 → BC38 → BC39 → BC44 → bsd_init: calling dev_kmem_init / kauth_init / ... → vfs_mountroot → VFS_ROOT`，不必逐点分包。
 
+**R-DT3 第一次 CI 失败（run `44887859524`，commit `fc83cdc`）**
+- 失败步：`Build kernel` 的 bootstrap pass，`osfmk/kern/startup.c:803`。
+- 报错：`error: expected identifier or '('`、`use of undeclared identifier 'boot_progress_stage'`。
+- 原因：`startup.c` 是 C 源文件，`__attribute__((weak_import))` 是 C++/ObjC 属性，C 下非法；而且 `startup.c` 第 1 行本来就 `#include <kern/boot_progress.h>`，声明已存在，不需要 extern。
+- 修复：删掉 extern 与 `if (boot_progress_stage)` 判断，`UNI_BC` 直接调用 `boot_progress_stage`（未启用时头文件已提供 `((void)0)` 宏）。
+- 门禁加固：`scripts/check-xnu-patch-replay.sh` 新增两条检查——C 源文件里出现 `weak_import` 判失败；`startup.c` 的 `UNI_BC` 定义必须匹配新写法。`TOTAL_FAILURES=0`。
+
