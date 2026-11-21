@@ -662,3 +662,12 @@ reboot
 - 复检：`git apply --check` 在 composed 树上通过（startup hunk offset -84；bsd_init hunk #4/#5 offset +1/-1），实际应用干净。
 - 留痕：`out/rdt1/fail.log`（131 KB）保留了完整失败日志。
 
+**第二次 CI（修复后）**：commit `8dd2af3` → run `44878727041`，2026-11-21 07:07Z 起。
+
+**第二次 CI 失败（run `44878727041`，仍未刷机）**
+- 表面错误：`offline-component-load-probes.patch` 同时报 `bsd/kern/bsd_init.c:478` 与 `iokit/Kernel/IOUserClient.cpp:6693`。
+- 真正机制：`build-xnu-4k-baseline.sh` 的补丁是**幂等重放**——第二遍先 `git apply --reverse --check`，失败才正向 apply。我们的 #30 检查点把 `extern unsigned int vm_page_wire_count;` 插在 `#endif` 与 `void bsd_init` 之间，正好落进 `offline-component-load-probes.patch` bsd_init 尾 3 行上下文 → 反查失败；正向又因第一遍已应用而失败。
+- 修复：删掉文件作用域 extern，改为 #30 块内 block-scope `extern`；bsd_init.c 从 5 个 hunk 减为 4 个。
+- 复检（本地 composed 树：8 个共享补丁 → 本补丁）：正向 `git apply --check` 通过；`offline-component-load-probes.patch --reverse --check` 通过（IOUserClient 跳过）；本补丁自反通过。
+- 旁证：上次成功 run `43728585549` 的 bootstrap 链接**同样失败**（`clang++: error: linker command failed`，第 1135 行），属该流程预期行为，不是本次回归。
+
