@@ -503,6 +503,19 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+      # The prelink report pair is what the storage/display/PMGR audits bind against. Uploading it
+      # lets a local Linux build reuse the warm seed instead of spending a whole run to make one.
+      - name: Upload storage seed
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: judyp-seed
+          path: |
+            out-seed/kernel.macho
+            out-seed/kernel.json
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Upload boot image and firmware volume
         if: always()
         uses: actions/upload-artifact@v4
