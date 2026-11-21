@@ -671,3 +671,17 @@ reboot
 - 复检（本地 composed 树：8 个共享补丁 → 本补丁）：正向 `git apply --check` 通过；`offline-component-load-probes.patch --reverse --check` 通过（IOUserClient 跳过）；本补丁自反通过。
 - 旁证：上次成功 run `43728585549` 的 bootstrap 链接**同样失败**（`clang++: error: linker command failed`，第 1135 行），属该流程预期行为，不是本次回归。
 
+**第三次 CI**：commit `51d0fb5` → run `44880578783`，2026-11-21 07:30Z 起。**已主动取消**——本地全量重放确认它仍会挂。
+
+**第三次失败的真因（已用全量重放证实）**
+- 即使 extern 改成 block-scope，#30 插在 `#endif` 与 `throttle_init()` 之间，仍落在 `zzz-boot-progress.patch` 反向 hunk 的尾部上下文里。
+- CI 第二遍重放时 `zzz-boot-progress.patch` 撤不下来，级联导致 `offline-owner-root-binding-audit` / `offline-owner-systemos-mount` / `sheng-platform-power` 一并失败（4 个报错里的后 3 个是级联，不是独立问题）。
+- 修复：删掉 startup patch 里 **bsd_init.c 的全部 4 个 hunk**（本轮卡点在 IOKit 之前，用不到），只留 startup.c 的 #27–29。
+
+**新增固定门禁：本地全量补丁重放（gate_all）**
+- 下载完整 xnu `d8b8029`（15 MB tarball），把 59 共享 + 13 本仓补丁按 CI 同样顺序 compose 成 70 个。
+- 三遍：①正向逐个 apply；②复刻 CI 幂等重放（先撤 5 个 LATE 补丁，再逐补丁 reverse-check，失败才 forward）；③全量反向（倒序）后再全量正向。
+- 基线对照：`b0bae2a` 的 68 补丁同法 0 失败 → 说明 gate 忠实复刻 CI。
+- 修复后结果：70 补丁三遍 **0 失败**，`BC50 DTAlloc enter`、`UNI_BC` 宏均在最终树中。
+- 规则：**此 gate 不过不 dispatch**，已写入 AGENTS.md。
+

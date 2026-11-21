@@ -41,11 +41,12 @@
 
 1. `EXPERIMENTS.md` 写命题 + 判定表（先写，后做）。
 2. 一个补丁；本地 `patch --dry-run` + `git apply --check` 双通过。
-3. commit → push GitHub `ci-scale` → dispatch（`seed_warm=true`）。
-4. CI 绿 → 取 artifact `kernel.macho` → `llvm-strings | grep <标识串>` 确认。
-5. 打 payload（或直接用 `out/` 里已有 payload；`payload.py` 超过 95% 会拒绝）。
-6. **刷 A 槽**：`set_active a` → `flash boot_a m4/boot-m4-nobtn.img` → `flash system_a <payload.img>` → `set_active a` → `reboot`。
-7. 看屏/拍照 → 按判定表回填 `EXPERIMENTS.md`。
+3. **dispatch 门禁**：`bash scripts/check-xnu-patch-replay.sh` 必须输出 `TOTAL_FAILURES=0`（该工具按 `unixnu.lock` 的 xnu rev 拉 pristine tarball，复刻 CI 三遍：正向逐个 apply、撤 5 个 LATE 后逐个 reverse-check、倒序全反向再正向）。门禁不过 **禁止 dispatch**。
+4. commit → push GitHub `ci-scale` → dispatch（`seed_warm=true`）。
+5. CI 绿 → 取 artifact `kernel.macho` → `llvm-strings | grep <标识串>` 确认。
+6. 打 payload（或直接用 `out/` 里已有 payload；`payload.py` 超过 95% 会拒绝）。
+7. **刷 A 槽**：`set_active a` → `flash boot_a m4/boot-m4-nobtn.img` → `flash system_a <payload.img>` → `set_active a` → `reboot`。
+8. 看屏/拍照 → 按判定表回填 `EXPERIMENTS.md`。
 
 ## 4. 当前状态（2026-11-21）
 
@@ -56,7 +57,7 @@
 - 已静态定位的链路：
   `PE_lockdown_iokit → zalloc_iokit_lockdown(4 条指令，不可能卡) → StartIOKitMatching → IOPlatformExpertDevice::startIOServiceMatching → IOWorkLoop::workLoop → IOService::registerService(0) → IOService::startMatching`
 
-- **R-DT1（进行中，2026-11-21）**：新增 `BC50..BC56`（`IODeviceTreeAlloc`）+ 恢复 `UNI_BC` 文本输出；dry-run / `git apply --check` 已过，待 CI 绿 → 取 `kernel.macho` → `llvm-strings` 验 BC50–56 → mcopy 打 payload → 刷 A 槽。
+- **R-DT1（进行中，2026-11-21）**：新增 `BC50..BC56`（`IODeviceTreeAlloc`）+ 恢复 `UNI_BC` 文本输出；已删除 startup patch 中 bsd_init.c 段（破坏 `zzz-boot-progress` 反向上下文）→ 本地 70 补丁三遍重放 `TOTAL_FAILURES=0`。待 commit/push → 第四次 CI → 取 `kernel.macho` → `llvm-strings` 验 BC50–56 → mcopy 打 payload → 刷 A 槽。
 
 ## 5. 明确禁止
 
