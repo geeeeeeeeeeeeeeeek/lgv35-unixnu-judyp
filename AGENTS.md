@@ -14,6 +14,7 @@
 8. **`boot_a` 只允许 `m4/boot-m4-*.img`**；**严禁**把 CI 的 `no-ramdisk/boot.img` 刷进 boot 分区（会秒进 BL）。
 9. **失败判定窗口 12~14 秒**（实测离开 fastboot 最慢 10.5s）。
 10. 结果一出立刻回写 `EXPERIMENTS.md`，不允许攒着写。
+11. **拉包必须走代理**：Windows 侧 `curl.exe --proxy http://127.0.0.1:111`，WSL 侧 `https_proxy=http://172.20.128.1:111`。直连 GitHub / artifact 会 404 或卡死；artifact zip 必须带 `Accept: application/vnd.github+json`。WSL 无 `unzip`，解压用 `python3 -m zipfile`。
 
 ## 1. 环境与路径
 

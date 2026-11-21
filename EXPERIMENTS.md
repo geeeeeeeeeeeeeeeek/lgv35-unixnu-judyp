@@ -697,3 +697,10 @@ reboot
 - 注意：artifact zip 必须带 `Accept: application/vnd.github+json` 才返回 302，否则 404；`unzip` 在 WSL 里没有，用 python zipfile。
 - 第五次 dispatch 参数：`defconfig=judyp_defconfig, xcode=26.6, seed_warm=true, data_seed_run_id=43677790897`。
 
+**第五次 CI：成功（run `44882769909`，commit `5f9cc25`，2026-11-21 07:59Z 起，16:17 完成）**
+- `judyp-kernel` artifact `14699550105`、`judyp-payload` artifact `14699445556`，经 Windows 代理 `127.0.0.1:111` 下载成功（WSL 侧直连/172.20.128.1 对该 artifact 返回 404）。
+- `llvm-strings kernel.macho`：`BC50=1 BC51=1 BC52=1 BC53=4 BC54=1 BC55=1 BC56=2`，字符串内容为 `BC50 DTAlloc enter` … `BC56 DTAlloc done`。
+- CI payload 内含 `kernel.macho`（126144512 B）、`kernel.macho.adt`、`DarwinBoot.efi`、`scratch-data.img`；`payload.json` 的 `kernel_sha256=c1ffff1f…`（artifact 内核），`payload_kernel_sha256=805c484b…`（注入 seed 后，194 字节差异，符合预期）。
+- 刷机：`set_active a` → `boot_a=m4/boot-m4-nobtn.img` → `system_a=out/rdt1/payload-rdt1.img` → `set_active a` → `reboot`；B 槽零操作。`slot-retry-count:a` 刷后=7。
+- 观察：离开 fastboot 后 120 s 未回 fastboot（`left=True elapsed=120.2s`），说明内核在运行、未秒进 BL。待拍照判读 stage 末行。
+
