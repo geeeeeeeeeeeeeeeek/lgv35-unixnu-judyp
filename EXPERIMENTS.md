@@ -475,3 +475,179 @@
   - P4 N≥31 需警惕自然 wired 增长污染（vfsinit/buffer cache/mountroot 会 wire 页）：判读看值是否精确落在 56772+4N 网格上；值大幅偏离网格 = 已过 IOKit、卡在 bsd 链内。
 - 与 ci9 采样的关联假设（待本轮证伪/证实）：PC=`_memmove+0xc4` 若对应 StartIOKitMatching 内部（IOService 匹配的 OSData/OSDictionary 拷贝），本轮应仍停在 N≤26；若对应 bsd 早期（如 bsd_bufferinit），应见 N≥30。
 - CI：seed_warm=true。结果：待填。
+
+### 轮次 R-CK3（先计划、后执行）—— 11-21
+
+**重盘点的硬事实（含证据）**
+
+1. **面板 stage history 就是内核的 `kernel_bootstrap_log` 流**。证据：`PE_lockdown_iokit` 这个字符串全树唯一来源是 `startup.c` 的 `kernel_bootstrap_log("PE_lockdown_iokit");`（见 `zzzzzzzz-startup-chain-checkpoints.patch` 的上下文行），payload 不可能知道这个名字。
+   → 推论：`df373d8` 用 `weak_import boot_progress_stage` 打 BCxx 是绕远路；那条通道本来就通，只是内核侧直接调是链接期空桩。
+2. 因此 ci9 照片里 stage 末行 `PE_lockdown_iokit` = 内核最后一条 bootstrap log。两种可能互斥、当前证据无法区分：
+   (a) 卡在 `PE_lockdown_iokit` 函数内部；(b) 已过 lockdown，但其后没有 bootstrap log（日志空洞）。
+3. PC=`_memmove+0xc4` 连采 8s + console 末行 `lockdown mode in nvram is off`（`csm_check_lockdown_mode` 打的，位于 lockdown 之前约 50 行）→ **printf 通道比 stage 通道早死**；"没有输出"不能当判据（与"已确认事实"第 2 条一致）。
+4. 外部对照（2026-11-21 检索，静态）：
+   - unixnu.com 已收录 judyp 设备页（指向本仓）。
+   - 同 SoC（SDM845）：enchilada 有 5 个独立端口（keyfan / rou2ter / dragon120820 / wangshaofan82-png），keyfan 的 bringup README 报已到 SpringBoard；OnePlus 6T（fajita）的 HakiOS 0.5 已全功能（Wi-Fi / LTE / GPU / 触控，2026-11-15 发布）。
+   - 上游官方调试设施我们一个都没用：`entry_probe_reset_delay / reset_after / reset_in`（过了指定调用点就 PSCI 重启 = 二进制问答，不需要拍照读数）、`panic_screen`、`build-tag=`（面板标题栏显示构建标签）、color bars / green bar、`serial=3`。
+   - 我们 `board.toml` 的 `entry_probe_reset_after` 现在指在 `_vfs_mountroot`（远点，等于白配）。
+   - 上游调试纪律原文：One question per run + 记录最后一个确认的 checkpoint。
+
+**计划与门禁（先计划、逐步验证、不蛮干）**
+
+Step 0 静态（本地，不碰设备、不碰 CI）
+- 0.1 验证 `kernel_bootstrap_log` → `boot_progress_stage` 的转发确实存在于 `patches/xnu/*` 的 boot-progress 补丁里。**不成立则第一节的推论作废，路线整体重排。**
+- 0.2 用 `llvm-nm` 在 ci9 的 `kernel.macho` 上找 lockdown 之后**非内联**的符号（`_vm_set_restrictions` / `_kperf_init_early` / `_bsd_init` 等），确定 `entry_probe_reset_in/after` 的可用组合。
+- 0.3 核 `kernel_args` 余量（当前 970/1000），新增参数后 ≤1000。
+
+Step 1 补丁（一个，先本地验证再 push）
+- 废弃 c81fabe 的 wired 计数版，改写为 `kernel_bootstrap_log("ck27: ...")` 串，首行加 `ci11-ident`。
+- 门禁（全真才允许刷机）：`patch --dry-run` + `git apply --check` @ pristine 双通过；diff 只动 `startup.c` / `bsd_init.c`；CI 绿；`llvm-strings kernel.macho | grep ck27` 命中。
+
+Step 2 刷机（只回答一个问题：身份 + 是否过 lockdown）
+- 刷 `system_a` → reboot → 只看 stage history 末行。
+- 出现 `ci11-ident` = 内核身份确认；末行 `ck27` = 已过 lockdown；末行仍 `PE_lockdown_iokit` 且无 ck27 = 卡在 lockdown 内；**无 `ci11-ident` = 没换成内核，只查 boot 链，不改内核**。
+
+Step 3 二分（仅当 Step 2 判"卡在 lockdown 内"）
+- `entry_probe_reset_after` 一次一个点，答案是"是否自动重启"，不拍照、不算数。
+
+Step 4 对齐 enchilada（仅需要时）
+- diff judyp 与 keyfan/enchilada 的 `xnu-device` 补丁与 ADT，**只产出 judyp 独有差异清单**，不盲改。
+
+**门禁规则**：任何一步验证不通过即停止，不进入下一步；每步结果回填本节。
+
+Step 0 结果（2026-11-21）
+- **0.1 ✅ 证实**：`/root/UniXNU/patches/xnu/zzz-boot-progress.patch` 把 `kernel_bootstrap_log()` 改成同时调用 `boot_progress_stage(message)`（补丁 L35-45）。故"面板 stage history = 内核 bootstrap log 流"成立。
+- **0.1 附带发现（直接改计划）**：同一补丁已内置 lockdown 之后的检查点——`bsd_init enter`（L134）、`vfs_mountroot enter`（L161）、`load_init_program enter`（L196）、`SystemOS mount enter/returned`（L204/206）、`Data mount enter/returned`（L210/212）；早期还有 `arm_vm_init enter/returned`（L20/22）与 `original PMGR nub start/returned`（L151/153）。
+  → ci9 末行是 `PE_lockdown_iokit` 且**没有** `bsd_init enter`，即停点位于 lockdown 调用与 bsd_init 之间。**这条判读不需要 wired 计数**，R-CK/R-CK2 的计数方案作废。
+  → `bsd_init` 内部还有 `bsd_init_kprintf()` 映射到 `boot_progress_stage("bsd_init: " x)`（L143），进入 bsd 后仍有粒度。
+- **0.3 取消**：本计划不再新增 boot arg（构建标识改用内核字符串 `ci11-ident`，经同一条通道上屏），1000 字节命令行限制与本轮无关。
+- **0.2 ✅ 完成（静态反汇编，ci8z kernel.macho）**，并推翻两条旧结论：
+  - `_PE_lockdown_iokit` **有独立符号**（`0xfffffff00bf4d318`），并非内联——旧"已确认事实"里"封闭嵌套无法埋点"不成立。
+  - 全部 BCxx 是**真实 `bl _boot_progress_stage`**（目标 `0xfffffff00bfa0688`，字符串在 `__cstring`）——旧结论"BCxx 在链接期是空桩"**错误**。
+- **0.2 反汇编得到的完整调用链与检查点地图**（ci8z，即 df373d8）：
+  - `PE_lockdown_iokit`：`BC40 enter` → `zalloc_iokit_lockdown` → `BC41 zalloc returned` → `StartIOKitMatching` → `BC42 StartIOKitMatching returned`。其中 `zalloc_iokit_lockdown` 只有 4 条指令（向 `0xc1b5000+0x502` 写 1 后 ret），**不可能阻塞**。
+  - `StartIOKitMatching`：`socd_client_trace(0x61f0004,0,0,0,0)` → 取全局槽（`0x71c80f8`）→ 非空则 `IOPlatformExpertDevice::startIOServiceMatching()`，空则走 cold.1/cold.2。
+  - `startIOServiceMatching`：`BC30 enter` → `IOWorkLoop::workLoop()` → 写 `self+0x88` → `BC31 workLoop allocated` → 空判 → `BC32 registerService enter` → `vtable[0x2a0](self,0)`（registerService）→ `BC33 registerService done` → 返回 1（空 workLoop 则返回 0）。
+- **据此，ci9（b0bae2a）是本轮的观测倒退**：它把 BCxx 换成 `vm_page_wire_count` 计数，stage history 里就只剩纯文本阶段（末行 `PE_lockdown_iokit`），名字全部消失，而数字又没取到 → 白跑一轮。**ci8 的 `out/ci8/payload-df373d8.img` 是 BC 版，本地已存在，重刷不需要 CI。**
+- **0.2 判定表（重刷 ci8 后只看 stage 末行）**：
+  | 末行 | 结论 |
+  |---|---|
+  | `BC30 startIOServiceMatching enter` | 卡在 `IOWorkLoop::workLoop()` |
+  | `BC32 registerService enter` | 卡在 `registerService`（vtable+0x2a0） |
+  | `BC33 registerService done` / `BC42` | 匹配已完成，卡点在 lockdown 之后 |
+  | `BC40` / `BC41` | 与静态结论矛盾（zalloc 只有 4 条指令），需查 stage 通道丢行 |
+- 下一步静态（Step 3 预置）：把 vtable `+0x2a0` 的目标函数反汇编出来，找 `memmove` 调用，与 `PC=_memmove+0xc4` 对齐。
+- **Step 3 预置结果 ✅**：对象 isa 指向 `__ZTV22IOPlatformExpertDevice+0x10`，故实际槽位是 `+0x2b0` = `IOService::registerService(uint32_t)`（`+0x2a0` 是 `IOService::updateReport`，误读）。`registerService` 共 131 条指令，调用链：`IORegistryEntry::getRegistryRoot` → `IOInstallServicePlatformActions` → `IOInstallServiceSleepPlatformActions` → **`IOService::startMatching(unsigned int)`** → `IOMalloc_internal` / `_strchr` / `IOFreeData` / `IOLog`。
+  → 真正的匹配引擎是 `IOService::startMatching`。静态定位到此为止（再往下需要运行时数据），下一步必须是刷 ci8 读末行。
+
+### 刷机记录 R-CK3-a（2026-11-21，全量重刷 A 槽）
+
+用户已把手机全量恢复原厂，故本次为全量重刷；**B 槽零操作**（全程未发出任何 `*_b` 命令）。
+
+```
+set_active a
+flash boot_a   m4/boot-m4-nobtn.img            67,108,864 B   OKAY
+flash system_a out/ci8/payload-df373d8.img    150,994,944 B   OKAY
+set_active a
+reboot
+```
+
+- 刷前：`current-slot=a`、`slot-retry-count:a=6`、`slot-unbootable:a=no`
+- 刷后：`current-slot=a`、`slot-retry-count:a=7`
+- 时间线：t=0.6s 离开 fastboot；120s 内未回 fastboot（无 panic 循环）
+- 待填：**stage history 末行** → 按上表判定卡点
+
+### 判读 R-CK3-a（2026-11-21 14:28 照片）
+
+**面板读数**
+- `t=6s idle=0s IRQ=1 mon=0 lost=0 root=0 proc=0 free=1188563`
+- `last IRQ PC=fffffff00b9f4478` → 符号化为 `_ml_set_interrupts_enabled_with_debug+0x50`（中断入口，非卡点）
+- `DAIF=3c0`（D/A/I/F 全屏蔽）；`PROC pass0=0`；`SMP boot=0 req=0`；`HANDOFF calls=0`；`DISPLAY calls=0`；`SWAP calls=0`
+- `MEM wired=56560`（**低于旧公式基线 56772 → 该公式基于另一构建，作废**）
+- stage 序列：`BC13 IOMachPortInitialize done` → `BC14 symbols done` → `BC15 interruptAccountingInit done` → `BC16 new IOPlatformExpertDevice` → `BC17 root nub allocated` → **`BC18 root nub init`**（重复出现，**无 BC19**）
+- console 末行：`NATIVE_CTL: PE_init_iokit entered` / `iBoot version:` / `iBoot Stage 2 version:`
+
+**判读**
+1. BC18 打在 `bool ok = gRootNub->init(dtTop);` **之前**（zzzzzzz-native-iokit-rootnub.patch L109-111），BC19 未出现 → **卡在 `IOPlatformExpertDevice::init(dtTop)` 内**。
+2. 该函数只有两步（反汇编 `0xfffffff00bee56fc`）：`bl IODeviceTreeAlloc(dtTop)` → 按返回值尾调用。故卡点收窄为 **`IODeviceTreeAlloc`**（`0xfffffff00be93eb4`，623 条指令）。
+3. `IODeviceTreeAlloc` 的调用面：`IORegistryEntry::makePlane`、11×`OSSymbol::withCStringNoCopy`、`OSData::withBytesNoCopy`、`OSArray::withCapacity/withObjects`、`zalloc_permanent_tag`、`IOMallocTypeVarImpl`、`IOLockAlloc`、`PE_parse_boot_argn`、`SecureDTInit/LookupEntry/GetProperty/IsLockedDown/InitEntryIterator/IterateEntries/EnterEntry/ExitEntry`、`MakeReferenceTable`、`IORegistryEntry::fromPath`、`OSDictionary::withCapacity`、`IORegistryIterator::iterateOver`、`IODTMapInterruptsSharing`、`strnstr/strlen/strtol`。**无直接 memmove 调用**，但 `withCStringNoCopy`/`withBytesNoCopy` 内部会 memmove —— 与旧照片 `_memmove+0xc4` 相符。
+4. **推翻"停在 PE_lockdown_iokit"**：本构建根本没走到 lockdown；旧读数应是 `PE_init_iokit`（console 里就有 `PE_init_iokit entered`）被误记。ci9 把 BC 换成数字后 stage 里只剩 bootstrap 文本，放大了这个误读。
+
+**下一步（按门禁执行）**
+- 零成本：解析 `board.dtb`，查异常属性（缺 `name`/`device_type`、长度 0 或超大、重复属性、子节点数异常）。
+- 一轮 CI：在 `IODeviceTreeAlloc` 内加 4 个 BC 点——`SecureDTInit` 后、`MakeReferenceTable` 后、DT 迭代循环内（计数）、`IODTMapInterruptsSharing` 前后。
+
+### DTB 静态体检（零成本，`overlay/Mu-Silicium/Resources/DTBs/judyp.dtb`）
+
+- 头：`magic=d00dfeed`，`totalsize=554858`，`version=17`，`last_comp=16`，struct 56+501832，strings 501888（52970 B），rsv 40 —— 结构完整，walker 无 `bad` token。
+- 规模：**3266 个节点**，最大深度 7。
+- 最大属性：5051 B，`/soc/qcom,mdss_mdp@ae00000/.../timing@0:qcom,mdss-dsi-on-command`（显示时序，正常）。
+- 重复属性：0；零长度属性：1428（都是布尔标志，正常）。
+- **全部 3266 个节点都没有 `name` 属性**（Linux/Qualcomm 风格；Apple 的 DeviceTree 每个节点都带 `name`）。
+- 根节点属性：`#address-cells / #size-cells / model / compatible / qcom,msm-id / interrupt-parent / qcom,board-id`。
+
+结论：结构层面没有畸形，**嫌疑转向语义层**（SecureDT/IODeviceTreeAlloc 依赖 Apple 风格属性，如每节点 `name`）；也可能是某个特定子树触发死循环。
+
+**下一轮（不需要重编内核，只换 DTB 重打 payload）——二分换树**
+1. 用只保留 `/cpus` + `/chosen` + 最小 `/soc` 的裁剪 DT 打 payload，刷 A 槽。若 BC19 出现 → 说明卡点由被裁掉的子树触发；若仍无 BC19 → 说明与 DT 内容无关（指向 SecureDT 初始化本身）。
+2. 按结果对半裁剪，逐轮收敛到具体节点。
+3. 并行验证：从 Mu-Silicium 取 `enchilada.dtb`（同 SoC、已知能过此步）做同项体检，比对 `name` 等 Apple 风格属性差异。
+
+### DTB 对照结果（enchilada vs judyp，2026-11-21）
+
+来源：`Project-Silicium/Mu-Silicium` `main` → `Resources/DTBs/enchilada.dtb`（555,398 B），下载后与本地 `judyp.dtb`（554,858 B）逐项比对。
+
+| 项 | judyp | enchilada |
+|---|---|---|
+| 版本 / 节点数 / 最深 | 17 / 3266 / 7 | 17 / 3265 / 7 |
+| `name` 属性数 | 0 | **0** |
+| 最大属性 | 5051 B | 5051 B |
+| interrupt-controller 数 | 36 | 36 |
+| interrupt-parent 环 | 2（均在 `/soc/qcom,pcie@0x1c00000`、`@0x1c08000`，两侧同） | 2（同） |
+| interrupt-parent 断链 | 0 | 0 |
+
+**结论：两棵树是同一套工具生成的孪生体，DT 结构/风格差异不是卡点原因。`name` 假设与 interrupt-parent 环假设均排除。**
+
+→ 剩余解释：卡在 `IODeviceTreeAlloc` 内的某一步与 DT 内容无关（`SecureDTInit` / `zalloc_permanent_tag` / `IORegistryEntry::makePlane` / `IODTMapInterruptsSharing` 的运行时状态），或 DT 并非 judyp.dtb 这一份。**必须靠内核侧检查点定位，静态排查到此为止。**
+
+### R-DT1 预登记（2026-11-21，`IODeviceTreeAlloc` 内部埋点）
+
+**命题**：卡点在 `IODeviceTreeAlloc` 内部，且可由 stage 字符串直接命名到具体步骤。
+
+**变更**
+1. 新增 `patches/xnu-device/zzzzzzzzz-native-dt-alloc-checkpoints.patch`：只改 `iokit/Kernel/IODeviceTreeSupport.cpp`（8 hunk / 7 个检查点）。
+2. `zzzzzzz-native-iokit-rootnub.patch` 的 `UNI_BC` 宏恢复调用 `boot_progress_stage()`（保留 +4 wire 计数）。理由：`llvm-nm out/ci8z/judyp/kernel/kernel.macho` 显示 `_boot_progress_stage` 为**已定义**符号（`S` @ `0xfffffff00bfa0688`），旧"stub 把调用抹成空"的判断错误；恢复后同一张照片能同时看到 BC13–18 旧链和新点。
+
+| 标识 | 位置 |
+|---|---|
+| BC50 | 函数入口（全部局部声明之后） |
+| BC51 | 14 个 `OSSymbol` + `OSData` + `OSArray` + `IODTResolvers` + assert 之后 |
+| BC52 | `MakeReferenceTable(dtTop)` 返回后 |
+| BC53 | 遍历循环内，child 计数 = 1 / 1000 / 2000 / 3000 |
+| BC54 | do/while 遍历结束 |
+| BC55 | `IODTMapInterruptsSharing` 循环结束 |
+| BC56 | `return parent` 前 |
+
+**门禁（先过再刷）**
+- [x] `git apply --check` @ pristine（xnu `d8b8029`，3 个文件）通过
+- [x] `patch -p1 --dry-run` 通过
+- [x] diff 仅 `iokit/Kernel/IODeviceTreeSupport.cpp`
+- [ ] CI 绿
+- [ ] `llvm-strings kernel.macho | grep -c BC50`（并抽查 BC51–BC56）命中
+- 任一不过 → 不刷机
+
+**判定表（刷后看 stage 末行）**
+
+| 末行 | 判读 |
+|---|---|
+| 仍 `BC18`、无 `BC50` | 新内核未运行或补丁未生效 → 先查刷机链，不判读 |
+| `BC50` | 卡在 `makePlane` / `OSSymbol::withCStringNoCopy` 段（BC50–BC51） |
+| `BC51` | 卡在 `SecureDTLookupEntry("/chosen/memory-map")` / `SecureDTGetProperty` / `SecureDTIsLockedDown` |
+| `BC52` | 卡在 `MakeReferenceTable(root)` 或 `SecureDTInitEntryIterator` |
+| `BC53 DT child 1/1000/2000/3000` | 卡在遍历区间内：`MakeReferenceTable(child)` / `attachToParent` / `AddPHandle` / `SecureDTEnterEntry` |
+| `BC54` | 卡在 `stack->release()` / assert / 根节点改名 / `attachToParent(registryRoot)` / `freeDT` 块 |
+| `BC55` | 卡在中断映射循环（`IORegistryIterator` / `IODTMapInterruptsSharing`）或 `allInts->release()` |
+| `BC56` | 函数跑完 → 卡点其实在 `init()` 返回路径，或 14:28 读数需重审 |
+
+**照片**：离开 fastboot 后 60–120 s 拍一张（面板 stage history 常驻）。
+

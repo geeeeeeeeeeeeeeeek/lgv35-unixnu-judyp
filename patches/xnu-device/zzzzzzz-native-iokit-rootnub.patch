@@ -31,18 +31,24 @@ old kernel and the problem is the flash chain, not the code. The kheap_alloc cha
 OSObject_typed_operator_new from the previous round is gone: upstream runs this XNU on the same SoC
 without touching the allocator, and the stall is now known to be before InitIOKit anyway.
 
+R-DT1 (2026-11-21): the macro calls boot_progress_stage() again next to the wire bump. The 14:28
+photograph did show BC13..BC18, and llvm-nm finds _boot_progress_stage defined in the kernel image
+(0xfffffff00bfa0688), so the "stub ate the calls" reading above was wrong; restoring the text keeps
+the old chain visible in the same frame as the new BC50..BC56 points in IODeviceTreeAlloc.
+
 diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
 index d0149a6..372aaf9 100644
 --- a/iokit/Kernel/IOPlatformExpert.cpp
 +++ b/iokit/Kernel/IOPlatformExpert.cpp
-@@ -2086,15 +2086,24 @@ IOPlatformExpertDevice::init(void *dtRoot)
+@@ -2086,15 +2086,25 @@ IOPlatformExpertDevice::init(void *dtRoot)
  	return true;
  }
  
 +/* UNI_CK: see the comment in iokit/Kernel/IOStartIOKit.cpp -- every site bumps vm_page_wire_count
 + * by 4; BC30..BC33 are N=22..25 in the execution-order table in pexpert/arm/pe_init.c. */
 +extern "C" unsigned int vm_page_wire_count;
-+#define UNI_BC(text) do { vm_page_wire_count += 4; } while (0)
++extern "C" void boot_progress_stage(const char *text) __attribute__((weak_import));
++#define UNI_BC(text) do { if (boot_progress_stage) boot_progress_stage(text); vm_page_wire_count += 4; } while (0)
 +
  bool
  IOPlatformExpertDevice::startIOServiceMatching(void)
@@ -64,7 +70,7 @@ diff --git a/iokit/Kernel/IOStartIOKit.cpp b/iokit/Kernel/IOStartIOKit.cpp
 index d74c063..a84209d 100644
 --- a/iokit/Kernel/IOStartIOKit.cpp
 +++ b/iokit/Kernel/IOStartIOKit.cpp
-@@ -130,6 +130,16 @@ iokit_post_constructor_init(void)
+@@ -130,6 +130,17 @@ iokit_post_constructor_init(void)
   */
  void (*record_startup_extensions_function)(void) = NULL;
  
@@ -76,7 +82,8 @@ index d74c063..a84209d 100644
 + * table for every site lives in the pe_init.c comment block.
 + */
 +extern "C" unsigned int vm_page_wire_count;
-+#define UNI_BC(text) do { vm_page_wire_count += 4; } while (0)
++extern "C" void boot_progress_stage(const char *text) __attribute__((weak_import));
++#define UNI_BC(text) do { if (boot_progress_stage) boot_progress_stage(text); vm_page_wire_count += 4; } while (0)
 +
  void
  InitIOKit(void *dtTop)

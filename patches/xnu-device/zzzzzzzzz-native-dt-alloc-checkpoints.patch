@@ -1,0 +1,117 @@
+Record where IODeviceTreeAlloc stalls, step by step, on the boot-progress panel (judyp bring-up).
+
+The 2026-11-21 14:28 photograph ends the stage history on "BC18 root nub init" with no
+"BC19 root nub inited", so the boot stops inside IOPlatformExpertDevice::init(dtTop).  That
+function's only substantive call is IODeviceTreeAlloc(dtTop); static review of its 623
+instructions and a twin-tree DTB comparison (enchilada vs judyp: same version 17, 3265/3266
+nodes, same interrupt-parent loops, no "name" property on either side) left no defensible
+candidate, so the next round has to locate the step from inside the function.
+
+Seven stage points, through the same weak boot_progress_stage() channel that produced BC13..BC18
+(the kernel image carries the definition, so the calls are linked, not elided):
+
+  BC50 IODeviceTreeAlloc entered       BC51 globals / OSSymbols ready
+  BC52 root reference table built      BC53 DT child 1/1000/2000/3000 (traversal progress)
+  BC54 tree traversal finished         BC55 interrupt-sharing pass finished
+  BC56 IODeviceTreeAlloc returning
+
+Reading: a stop before BC51 names the OSSymbol / zalloc_permanent_type / IOLockAlloc block; a stop
+between BC52 and the first BC53 names MakeReferenceTable of the root or of the first child; a stop
+inside the traversal is bounded by the BC53 interval; a stop between BC54 and BC55 names the
+registry-root attach / freeDT block or the IODictionary setup; no BC56 means the interrupt pass.
+
+Numbering starts at 50 so it cannot collide with BC10..BC22 (InitIOKit), BC30..BC33 (matching)
+and BC40..BC42 (lockdown).
+
+diff --git a/iokit/Kernel/IODeviceTreeSupport.cpp b/iokit/Kernel/IODeviceTreeSupport.cpp
+--- a/iokit/Kernel/IODeviceTreeSupport.cpp
++++ b/iokit/Kernel/IODeviceTreeSupport.cpp
+@@ -104,6 +104,15 @@
+ static void FreePhysicalMemory( vm_offset_t * range );
+ static bool IODTMapInterruptsSharing( IORegistryEntry * regEntry, OSDictionary * allInts );
+ 
++/*
++ * UNI_DT: stage points inside IODeviceTreeAlloc, same weak channel as BC10..BC22 in
++ * iokit/Kernel/IOStartIOKit.cpp (package/BootProgress.c paints the panel from the caller, so a
++ * breadcrumb survives the IRQ-off hard lock).  BC50..BC56 only; the InitIOKit/matching/lockdown
++ * ranges are 10..22, 30..33 and 40..42.
++ */
++extern "C" void boot_progress_stage(const char *text) __attribute__((weak_import));
++#define UNI_DT(text) do { if (boot_progress_stage) boot_progress_stage(text); } while (0)
++
+ // FIXME: Implementation of this function is hidden from the static analyzer.
+ // The analyzer doesn't know that the registry holds retains, and gets confused
+ // about releases after calls to 'attachToParent'.
+@@ -128,6 +137,9 @@
+ 	bool                        freeDT;
+ 	char                        exBootArg[64];
+ 	const char *                found;
++	static unsigned int         uni_dt_children;
++
++	UNI_DT("BC50 DTAlloc enter");
+ 
+ 	gIODTPlane = IORegistryEntry::makePlane( kIODeviceTreePlane );
+ 
+@@ -186,6 +198,8 @@
+ 	    && gIODTResolvers && gIODTResolvers->lock && gIODTResolvers->resolvers
+ 	    );
+ 
++	UNI_DT("BC51 DTAlloc globals ready");
++
+ 	foundDTNode = (kSuccess == SecureDTLookupEntry( NULL, "/chosen/memory-map", &mapEntry ))
+ 	    && (kSuccess == SecureDTGetProperty( mapEntry,
+ 	    "DeviceTree", (void const **) &dtMap, &propSize ))
+@@ -195,6 +209,8 @@
+ 
+ 	parent = MakeReferenceTable((DTEntry)dtTop, freeDT );
+ 
++	UNI_DT("BC52 DT root table built");
++
+ 	stack = OSArray::withObjects((const OSObject **) &parent, 1, 10 );
+ 	SecureDTInitEntryIterator((DTEntry)dtTop, &iter );
+ 
+@@ -204,6 +220,17 @@
+ 		stack->removeObject( stack->getCount() - 1);
+ 
+ 		while (kSuccess == SecureDTIterateEntries( &iter, &dtChild)) {
++			/* UNI_DT: 3266 nodes = 3265 children, so these bound a traversal stall. */
++			uni_dt_children++;
++			if (uni_dt_children == 1) {
++				UNI_DT("BC53 DT child 1");
++			} else if (uni_dt_children == 1000) {
++				UNI_DT("BC53 DT child 1000");
++			} else if (uni_dt_children == 2000) {
++				UNI_DT("BC53 DT child 2000");
++			} else if (uni_dt_children == 3000) {
++				UNI_DT("BC53 DT child 3000");
++			}
+ 			child = MakeReferenceTable( dtChild, freeDT );
+ 			child->attachToParent( parent, gIODTPlane);
+ 
+@@ -236,6 +263,8 @@
+ 	} while (stack->getCount()
+ 	    && (kSuccess == SecureDTExitEntry( &iter, &dtChild)));
+ 
++	UNI_DT("BC54 DT tree built");
++
+ 	stack->release();
+ 	assert(kSuccess != SecureDTExitEntry(&iter, &dtChild));
+ 
+@@ -282,6 +311,8 @@
+ 		regIter->release();
+ 	}
+ 
++	UNI_DT("BC55 DT interrupts mapped");
++
+ #if IODTSUPPORTDEBUG
+ 	parent->setProperty("allInts", allInts);
+ 	parent->setProperty("sharedInts", gIODTSharedInterrupts);
+@@ -312,6 +343,8 @@
+ 		    (OSObject *) gIODTNWInterruptMappingKey );
+ 	}
+ 
++	UNI_DT("BC56 DTAlloc done");
++
+ 	return parent;
+ }
+ #endif
