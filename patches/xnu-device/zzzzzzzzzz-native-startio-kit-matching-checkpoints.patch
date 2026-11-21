@@ -1,0 +1,19 @@
+--- a/iokit/Kernel/IOStartIOKit.cpp
++++ b/iokit/Kernel/IOStartIOKit.cpp
+@@ -207,6 +207,7 @@
+ 	SOCD_TRACE_XNU(START_IOKIT);
+ 	assert(gRootNub != NULL);
+ 	bool ok = gRootNub->startIOServiceMatching();
++	UNI_BC("BC34 matching returned");
+ 	if (__improbable(!ok)) {
+ 		panic("Failed to start IOService matching");
+ 	}
+@@ -221,6 +222,8 @@
+ 		IOService::getServiceRoot()->adjustBusy(1);
+ 	}
+ #endif
++	UNI_BC("BC35 kextd busy done");
++	UNI_BC("BC36 StartIOKitMatching end");
+ }
+ 
+ void

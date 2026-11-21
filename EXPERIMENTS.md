@@ -704,3 +704,31 @@ reboot
 - 刷机：`set_active a` → `boot_a=m4/boot-m4-nobtn.img` → `system_a=out/rdt1/payload-rdt1.img` → `set_active a` → `reboot`；B 槽零操作。`slot-retry-count:a` 刷后=7。
 - 观察：离开 fastboot 后 120 s 未回 fastboot（`left=True elapsed=120.2s`），说明内核在运行、未秒进 BL。待拍照判读 stage 末行。
 
+**R-DT1 判读（2026-11-21 16:2x 照片）**
+- 面板 stage 末行 = `BC33 registerService done`；可见历史为 `kernel_do_post - done → PE_lockdown_iokit → BC30 → BC31 → BC32 → BC33`。
+- **BC50–BC56 全部未出现** → `IODeviceTreeAlloc` 从未进入。
+- **推翻旧结论**：14:28 照片的"末行 BC18 root nub init"并非卡点。旧 `UNI_BC` 只做 `vm_page_wire_count += 4`、不输出文本，BC19–BC22 与 BC30–BC33 都不可能出现在 stage 流里；"BC18"只是最后一条**有文本**的检查点。本次恢复文本输出后，真实进度到 BC33。
+- 结论：InitIOKit（BC19/20）、`PE_lockdown_iokit`、`zalloc_iokit_lockdown`、`startIOServiceMatching` 全部通过；`registerService()` 已返回。卡点在 `StartIOKitMatching` 内 `startIOServiceMatching()` 返回之后的收尾段（`OSKext::iokitDaemonAvailable()` / `IOService::getServiceRoot()->adjustBusy(1)`）或其返回路径。
+- 由此 R-DT1 原命题（卡在 `IODeviceTreeAlloc`）**不成立**，DT 补丁无副作用但本轮无用。
+
+**R-DT2 预登记（`StartIOKitMatching` 收尾段）**
+
+命题：卡点是 `StartIOKitMatching` 中 `startIOServiceMatching()` 返回之后的一步，可由 BC34–BC36 命名。
+
+| 标识 | 位置（`iokit/Kernel/IOStartIOKit.cpp`） |
+|---|---|
+| BC34 | `bool ok = gRootNub->startIOServiceMatching();` 之后、`!ok` 判断之后 |
+| BC35 | `#if !NO_KEXTD ... #endif` 块之后 |
+| BC36 | `StartIOKitMatching` 末尾（`return` 前） |
+
+判定表：
+
+| 末行 | 判读 |
+|---|---|
+| 仍 `BC33`、无 `BC34` | 卡在 `startIOServiceMatching()` 返回路径（return true 之后、调用者取返回值） |
+| `BC34` | 卡在 `OSKext::iokitDaemonAvailable()` / `adjustBusy(1)` |
+| `BC35` | 卡在函数尾（栈展开/返回） |
+| `BC36` | `StartIOKitMatching` 完整返回 → 卡点转移到 `PE_lockdown_iokit` 返回后的 `PE_init_iokit` 后续步骤 |
+
+门禁：同前（本地 70+1 补丁三遍重放 `TOTAL_FAILURES=0`），CI 绿后 `llvm-strings` 验 BC34–36，再刷 A 槽。
+
