@@ -651,3 +651,14 @@ reboot
 
 **照片**：离开 fastboot 后 60–120 s 拍一张（面板 stage history 常驻）。
 
+**执行记录**：commit `ec0863a` 已推 GitHub `ci-scale`（remote=head `ec0863a`）；CI run `44877670553` 于 2026-11-21 06:53Z 起 `in_progress`（inputs: `judyp_defconfig / xcode 26.6 / seed_warm=true`）。
+
+**CI 结果：失败（未刷机）** — job `136765855769`，step 17 `Build kernel`：
+`error: patch failed: bsd/kern/bsd_init.c:481` / `patch does not apply`。
+
+- 出错的是 `zzzzzzzz-startup-chain-checkpoints.patch`（c81fabe 引入，从未跑过 CI），不是 R-DT1 的新补丁。
+- 原因：补丁的 bsd_init.c 上下文按 **pristine** 写，而实际系列里 `offline-component-load-probes.patch` 已在注释与 `void bsd_init` 之间插入 `#if DEVELOPMENT || DEBUG` 块；`#define bsd_init_kprintf(x, ...)` 那行也被 `zzz-boot-progress.patch` 改写成 `boot_progress_stage("bsd_init: " x)`。
+- 修复：本地按排序应用所有触碰这两个文件的共享补丁（`native-trust-cache-runtime` / `offline-component-load-probes` / `offline-legacy-start` / `offline-native-gpu-broker` / `offline-owner-root-binding-audit` / `offline-owner-root-crypto-probe` / `sheng-platform-power` / `zzz-boot-progress`）重建 composed `bsd_init.c` + `startup.c`，重写 hunk：extern 移到 `#endif` 之后、#30 锚到 `boot_progress_stage("bsd_init: " x)` 之后、其余 3 个点更新行号。
+- 复检：`git apply --check` 在 composed 树上通过（startup hunk offset -84；bsd_init hunk #4/#5 offset +1/-1），实际应用干净。
+- 留痕：`out/rdt1/fail.log`（131 KB）保留了完整失败日志。
+
